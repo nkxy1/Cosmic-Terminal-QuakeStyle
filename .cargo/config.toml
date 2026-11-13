@@ -1,0 +1,4 @@
+# mold links libcosmic/wgpu noticeably faster than the default linker.
+# Install it (`sudo dnf install mold`) or delete this file.
+[build]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

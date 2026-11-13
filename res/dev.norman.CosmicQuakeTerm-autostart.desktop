@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Quake Terminal (background daemon)
+Comment=Starts the drop-down terminal hidden so the toggle shortcut responds instantly
+Exec=cosmic-quake-term --daemon
+Icon=utilities-terminal
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
