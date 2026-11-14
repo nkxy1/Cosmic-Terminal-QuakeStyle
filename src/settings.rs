@@ -23,6 +23,8 @@ pub struct QuakeConfig {
     pub width_percent: u16,
     /// Slide animation duration in milliseconds; 0 turns the animation off.
     pub animation_ms: u16,
+    /// Name of the output to show the terminal on; empty = the active output.
+    pub monitor: String,
 }
 
 impl Default for QuakeConfig {
@@ -31,6 +33,7 @@ impl Default for QuakeConfig {
             height_percent: 40,
             width_percent: 100,
             animation_ms: DEFAULT_ANIMATION_MS,
+            monitor: String::new(),
         }
     }
 }
@@ -77,6 +80,7 @@ pub struct Update {
     pub height: Option<u16>,
     pub width: Option<u16>,
     pub animation_ms: Option<u16>,
+    pub monitor: Option<String>,
 }
 
 /// Parse the argument of `--animation`: `on`, `off` or a duration in milliseconds.
@@ -108,6 +112,11 @@ pub fn save(update: Update) -> Result<QuakeConfig, String> {
     if let Some(ms) = update.animation_ms {
         config
             .set_animation_ms(&handler, ms.min(MAX_ANIMATION_MS))
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(monitor) = update.monitor {
+        config
+            .set_monitor(&handler, monitor)
             .map_err(|e| e.to_string())?;
     }
     Ok(config)

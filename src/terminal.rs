@@ -93,13 +93,16 @@ impl From<Size> for WindowSize {
     }
 }
 
+/// Identifies one terminal (one split pane) across tabs, so events can be routed to it.
+pub type TerminalId = u64;
+
 #[derive(Clone)]
-pub struct EventProxy(mpsc::UnboundedSender<Event>);
+pub struct EventProxy(TerminalId, mpsc::UnboundedSender<(TerminalId, Event)>);
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         //TODO: handle error
-        let _ = self.0.send(event);
+        let _ = self.1.send((self.0, event));
     }
 }
 
@@ -205,7 +208,8 @@ impl Terminal {
     //TODO: error handling
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        event_tx: mpsc::UnboundedSender<Event>,
+        id: TerminalId,
+        event_tx: mpsc::UnboundedSender<(TerminalId, Event)>,
         config: Config,
         options: Options,
         app_config: &AppConfig,
@@ -257,7 +261,7 @@ impl Terminal {
             cell_width,
             cell_height,
         };
-        let event_proxy = EventProxy(event_tx);
+        let event_proxy = EventProxy(id, event_tx);
         let term = Arc::new(FairMutex::new(Term::new(
             config,
             &size,

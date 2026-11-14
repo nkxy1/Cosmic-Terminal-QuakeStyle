@@ -93,6 +93,17 @@ pub fn context_menu<'a>(
     );
 
     rows.push(divider::horizontal::light().into());
+    for (label, action) in [
+        (fl!("menu-split-horizontal"), Action::SplitHorizontal),
+        (fl!("menu-split-vertical"), Action::SplitVertical),
+        (fl!("menu-new-tab"), Action::NewTab),
+        (fl!("menu-close"), Action::ClosePane),
+    ] {
+        rows.push(
+            item(label, find_key(&action), Some(Message::MenuAction(action))).into(),
+        );
+    }
+    rows.push(divider::horizontal::light().into());
     rows.push(
         item(
             fl!("menu-settings"),

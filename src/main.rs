@@ -12,6 +12,7 @@ mod menu;
 mod mouse_reporter;
 mod settings;
 mod slide;
+mod tabs;
 mod terminal;
 mod terminal_box;
 mod terminal_theme;
@@ -42,14 +43,17 @@ use cosmic::{
             set_anchor, set_keyboard_interactivity, set_size,
         },
     },
-    widget::{self, menu::key_bind::{KeyBind, Modifier}},
+    cctk::sctk::reexports::client::protocol::wl_output::WlOutput,
+    iced::event::{PlatformSpecific, wayland::{Event as WaylandEvent, OutputEvent}},
+    widget::{self, menu::key_bind::{KeyBind, Modifier}, pane_grid, segmented_button},
 };
 use tokio::sync::mpsc;
 
 use config::{COSMIC_THEME_DARK, COSMIC_THEME_LIGHT, ColorSchemeKind, Config};
 use menu::{MenuState, context_menu};
 use settings::QuakeConfig;
-use terminal::Terminal;
+use tabs::{Tab, TermPane};
+use terminal::{Terminal, TerminalId};
 use terminal_box::terminal_box;
 
 const CONFIG_VERSION: u64 = config::CONFIG_VERSION;
@@ -64,6 +68,19 @@ pub enum Action {
     Paste,
     SelectAll,
     Settings,
+    NewTab,
+    ClosePane,
+    SplitHorizontal,
+    SplitVertical,
+    NextTab,
+    PrevTab,
+    /// Jump to the n-th tab (0-based).
+    ActivateTab(usize),
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    ToggleMaximize,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -84,6 +101,26 @@ fn default_key_binds() -> HashMap<KeyBind, Action> {
     bind(&cs, Key::Character("C".into()), Action::Copy);
     bind(&cs, Key::Character("V".into()), Action::Paste);
     bind(&cs, Key::Character("A".into()), Action::SelectAll);
+    // Same defaults as cosmic-term for tabs and splits.
+    bind(&cs, Key::Character("T".into()), Action::NewTab);
+    bind(&cs, Key::Character("W".into()), Action::ClosePane);
+    let ca = [Modifier::Ctrl, Modifier::Alt];
+    bind(&ca, Key::Character("d".into()), Action::SplitHorizontal);
+    bind(&ca, Key::Character("r".into()), Action::SplitVertical);
+    bind(&cs, Key::Character("X".into()), Action::ToggleMaximize);
+    bind(&[Modifier::Ctrl], Key::Named(Named::Tab), Action::NextTab);
+    bind(&cs, Key::Named(Named::Tab), Action::PrevTab);
+    for n in 0..9usize {
+        bind(&cs, Key::Character((n + 1).to_string().into()), Action::ActivateTab(n));
+    }
+    bind(&cs, Key::Named(Named::ArrowLeft), Action::FocusLeft);
+    bind(&cs, Key::Character("H".into()), Action::FocusLeft);
+    bind(&cs, Key::Named(Named::ArrowRight), Action::FocusRight);
+    bind(&cs, Key::Character("L".into()), Action::FocusRight);
+    bind(&cs, Key::Named(Named::ArrowUp), Action::FocusUp);
+    bind(&cs, Key::Character("K".into()), Action::FocusUp);
+    bind(&cs, Key::Named(Named::ArrowDown), Action::FocusDown);
+    bind(&cs, Key::Character("J".into()), Action::FocusDown);
     bind(&[Modifier::Ctrl], Key::Character("=".into()), Action::ZoomIn);
     bind(&cs, Key::Character("+".into()), Action::ZoomIn);
     bind(&[Modifier::Ctrl], Key::Character("-".into()), Action::ZoomOut);
@@ -103,6 +140,11 @@ fn usage() -> String {
         ("--height N", fl!("cli-height")),
         ("--width N", fl!("cli-width")),
         ("--animation on|off|MS", fl!("cli-animation")),
+        ("--monitor NAME|active", fl!("cli-monitor")),
+        ("--list-monitors", fl!("cli-list-monitors")),
+        ("--new-tab", fl!("cli-new-tab")),
+        ("--split-horizontal", fl!("cli-split-horizontal")),
+        ("--split-vertical", fl!("cli-split-vertical")),
         ("--help", fl!("cli-help")),
     ];
     let mut text = format!(
@@ -137,33 +179,51 @@ fn main() -> iced::Result {
             }
             false
         }
-        Some(flag @ ("--toggle" | "--show" | "--hide" | "--quit")) => {
+        Some(flag @ ("--toggle" | "--show" | "--hide" | "--quit" | "--new-tab" | "--split-horizontal" | "--split-vertical")) => {
             let command = match flag {
                 "--toggle" => dbus::Command::Toggle,
                 "--show" => dbus::Command::Show,
                 "--hide" => dbus::Command::Hide,
+                "--new-tab" => dbus::Command::NewTab,
+                "--split-horizontal" => dbus::Command::SplitHorizontal,
+                "--split-vertical" => dbus::Command::SplitVertical,
                 _ => dbus::Command::Quit,
             };
             if dbus::is_running() {
                 exit_after_send(command);
             }
             // No daemon yet: only toggle/show make sense, they start one.
-            if matches!(command, dbus::Command::Hide | dbus::Command::Quit) {
+            if !matches!(command, dbus::Command::Toggle | dbus::Command::Show) {
                 eprintln!("{}", fl!("cli-not-running"));
                 std::process::exit(0);
             }
             true
         }
-        Some(flag @ ("--height" | "--width" | "--animation")) => {
+        Some("--list-monitors") => {
+            if !dbus::is_running() {
+                eprintln!("{}", fl!("cli-not-running"));
+                std::process::exit(1);
+            }
+            match dbus::list_monitors() {
+                Ok(names) if names.is_empty() => println!("{}", fl!("cli-no-monitors")),
+                Ok(names) => names.iter().for_each(|name| println!("{name}")),
+                Err(err) => {
+                    eprintln!("{}", fl!("cli-contact-failed", error = err.to_string()));
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        Some(flag @ ("--height" | "--width" | "--animation" | "--monitor")) => {
             let mut update = settings::Update::default();
             let mut next = Some(flag.to_string());
             while let Some(flag) = next.take() {
                 let value = args.next();
-                let bad = |animation: bool| -> ! {
-                    let message = if animation {
-                        fl!("cli-needs-animation", flag = flag.clone())
-                    } else {
-                        fl!("cli-needs-percent", flag = flag.clone())
+                let bad = |kind: u8| -> ! {
+                    let message = match kind {
+                        1 => fl!("cli-needs-animation", flag = flag.clone()),
+                        2 => fl!("cli-needs-monitor", flag = flag.clone()),
+                        _ => fl!("cli-needs-percent", flag = flag.clone()),
                     };
                     eprintln!("{message}\n\n{}", usage());
                     std::process::exit(2);
@@ -171,19 +231,33 @@ fn main() -> iced::Result {
                 match flag.as_str() {
                     "--height" => {
                         update.height = Some(
-                            value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(false)),
+                            value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(0)),
                         )
                     }
                     "--width" => {
                         update.width = Some(
-                            value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(false)),
+                            value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(0)),
                         )
                     }
                     "--animation" => {
                         update.animation_ms = Some(
                             value
                                 .and_then(|v| settings::parse_animation(&v))
-                                .unwrap_or_else(|| bad(true)),
+                                .unwrap_or_else(|| bad(1)),
+                        )
+                    }
+                    "--monitor" => {
+                        update.monitor = Some(
+                            value
+                                .filter(|v| !v.is_empty())
+                                .map(|v| {
+                                    if v.eq_ignore_ascii_case("active") {
+                                        String::new()
+                                    } else {
+                                        v
+                                    }
+                                })
+                                .unwrap_or_else(|| bad(2)),
                         )
                     }
                     _ => {
@@ -205,7 +279,12 @@ fn main() -> iced::Result {
                             "cli-summary",
                             height = config.height_percent.to_string(),
                             width = config.width_percent.to_string(),
-                            animation = animation
+                            animation = animation,
+                            monitor = if config.monitor.is_empty() {
+                                fl!("cli-monitor-active")
+                            } else {
+                                config.monitor.clone()
+                            }
                         )
                     );
                     std::process::exit(0);
@@ -289,7 +368,7 @@ struct Flags {
 #[derive(Clone, Debug)]
 enum Message {
     Config(Box<Config>),
-    ContextMenu(Option<MenuState>),
+    ContextMenu(pane_grid::Pane, Option<MenuState>),
     CopyLink,
     Dbus(dbus::Command),
     Tick(std::time::Instant),
@@ -305,6 +384,9 @@ enum Message {
     /// A slider moved (not applied until released).
     Draft(Field, f32),
     AnimationToggle(bool),
+    /// Index into `monitor_choices`.
+    MonitorSelected(usize),
+    Output(OutputEvent, WlOutput),
     /// Text typed into a field.
     FieldInput(Field, String),
     /// Enter pressed in a field.
@@ -314,9 +396,26 @@ enum Message {
     Key(Modifiers, Key),
     Paste,
     PasteValue(String),
-    TermEvent(TermEvent),
+    TermEvent(TerminalId, TermEvent),
     Toggle,
     Zoom(i8),
+    /// Ctrl + wheel over a specific pane.
+    ZoomPane(pane_grid::Pane, i8),
+    /// Double middle click over a specific pane: back to the configured font size.
+    ZoomResetPane(pane_grid::Pane),
+    NewTab,
+    ClosePane,
+    Split(pane_grid::Axis),
+    TabActivate(segmented_button::Entity),
+    TabClose(segmented_button::Entity),
+    NextTab,
+    PrevTab,
+    ActivateTabIndex(usize),
+    FocusPane(pane_grid::Direction),
+    ToggleMaximize,
+    PaneClicked(pane_grid::Pane),
+    PaneResized(pane_grid::ResizeEvent),
+    PaneDragged(pane_grid::DragEvent),
     ZoomReset,
     /// Sent shortly after the surface is mapped: relax exclusive keyboard grab.
     Settle(window::Id),
@@ -388,6 +487,12 @@ struct Slide {
     ms: u32,
 }
 
+/// A connected output as announced by the compositor.
+struct OutputEntry {
+    output: WlOutput,
+    name: String,
+}
+
 struct Quake {
     core: Core,
     #[allow(dead_code)]
@@ -396,11 +501,15 @@ struct Quake {
     themes: HashMap<(String, ColorSchemeKind), TermColors>,
     term_config: term::Config,
     key_binds: HashMap<KeyBind, Action>,
-    terminal: Option<Mutex<Terminal>>,
-    term_tx: Option<mpsc::UnboundedSender<TermEvent>>,
-    terminal_id: widget::Id,
+    /// All tabs; each owns a grid of split terminals.
+    tabs: Vec<Tab>,
+    /// The tab bar's model; its active entity selects the visible tab.
+    tab_model: segmented_button::SingleSelectModel,
+    next_terminal_id: TerminalId,
+    term_tx: mpsc::UnboundedSender<(TerminalId, TermEvent)>,
     surface: Option<window::Id>,
-    context_menu: Option<MenuState>,
+    /// Open context menu: the pane it belongs to and its position/link.
+    context_menu: Option<(pane_grid::Pane, MenuState)>,
     quake: QuakeConfig,
     /// True between creating the surface and learning the output size.
     measuring: bool,
@@ -412,6 +521,10 @@ struct Quake {
     surface_height: u32,
     /// True while the user drags the bottom edge.
     resizing: bool,
+    /// Connected outputs, kept up to date from the compositor's output events.
+    outputs: Vec<OutputEntry>,
+    /// Entries of the monitor drop-down: the "active monitor" label, then every output.
+    monitor_choices: Vec<String>,
     /// The settings page replaces the terminal while this is set.
     settings_open: bool,
     /// Values shown by the settings page; written to `quake` when a slider is released.
@@ -465,13 +578,55 @@ impl Quake {
             .copied()
     }
 
-    fn spawn_terminal(&mut self, tx: mpsc::UnboundedSender<TermEvent>) {
+    fn active_tab(&self) -> Option<&Tab> {
+        let entity = self.tab_model.active();
+        self.tabs.iter().find(|tab| tab.entity == entity)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let entity = self.tab_model.active();
+        self.tabs.iter_mut().find(|tab| tab.entity == entity)
+    }
+
+    /// The terminal that receives keyboard input.
+    fn focused_terminal(&self) -> Option<&Mutex<Terminal>> {
+        self.active_tab()?.focused().map(|pane| &pane.terminal)
+    }
+
+    fn terminal_by_id(&self, id: TerminalId) -> Option<&Mutex<Terminal>> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .find(|(_, pane)| pane.id == id)
+            .map(|(_, pane)| &pane.terminal)
+    }
+
+    fn all_terminals(&self) -> impl Iterator<Item = &Mutex<Terminal>> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .map(|(_, pane)| &pane.terminal)
+    }
+
+    /// Give the keyboard focus to the focused pane of the visible tab.
+    fn focus_task(&self) -> Task<Message> {
+        match self.active_tab().and_then(Tab::focused) {
+            Some(pane) => widget::text_input::focus(pane.widget_id.clone()),
+            None => Task::none(),
+        }
+    }
+
+    /// Start a shell in a new terminal. `None` if it could not be created.
+    fn create_pane(&mut self) -> Option<TermPane> {
         let Some(colors) = self.colors() else {
             log::error!("no terminal color scheme available");
-            return;
+            return None;
         };
+        let id = self.next_terminal_id;
+        self.next_terminal_id += 1;
         match Terminal::new(
-            tx,
+            id,
+            self.term_tx.clone(),
             self.term_config.clone(),
             tty::Options::default(),
             &self.config,
@@ -481,10 +636,192 @@ impl Quake {
         ) {
             Ok(mut terminal) => {
                 terminal.set_config(&self.config, &self.themes);
-                self.terminal = Some(Mutex::new(terminal));
+                Some(TermPane {
+                    id,
+                    terminal: Mutex::new(terminal),
+                    widget_id: widget::Id::unique(),
+                })
             }
-            Err(err) => log::error!("failed to open terminal: {err}"),
+            Err(err) => {
+                log::error!("failed to open terminal: {err}");
+                None
+            }
         }
+    }
+
+    fn new_tab(&mut self) -> Task<Message> {
+        let Some(pane) = self.create_pane() else {
+            return Task::none();
+        };
+        if let Some(tab) = self.active_tab() {
+            tab.unfocus_all();
+        }
+        let entity = self
+            .tab_model
+            .insert()
+            .text(fl!("tab-title"))
+            .closable()
+            .activate()
+            .id();
+        let tab = Tab::new(entity, pane);
+        tab.sync_focus();
+        self.tabs.push(tab);
+        self.focus_task()
+    }
+
+    fn split(&mut self, axis: pane_grid::Axis) -> Task<Message> {
+        let Some(new_pane) = self.create_pane() else {
+            return Task::none();
+        };
+        if let Some(tab) = self.active_tab_mut() {
+            let focus = tab.focus;
+            if let Some((pane, _)) = tab.panes.split(axis, focus, new_pane) {
+                tab.focus = pane;
+                tab.sync_focus();
+            }
+        }
+        self.focus_task()
+    }
+
+    /// Close the terminal `id` (shell ended or user closed it). A tab disappears with its
+    /// last terminal; when the very last tab goes, a fresh shell is started and the
+    /// terminal is hidden.
+    fn close_terminal(&mut self, id: TerminalId) -> Task<Message> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.pane_of(id).is_some()) else {
+            return Task::none();
+        };
+        self.close_context_menu();
+        let tab = &mut self.tabs[index];
+        if tab.panes.iter().count() > 1 {
+            if let Some(handle) = tab.pane_of(id) {
+                if let Some((_closed, sibling)) = tab.panes.close(handle) {
+                    if tab.focus == handle {
+                        tab.focus = sibling;
+                    }
+                }
+                tab.sync_focus();
+            }
+            self.focus_task()
+        } else {
+            self.close_tab_at(index)
+        }
+    }
+
+    fn close_tab_at(&mut self, index: usize) -> Task<Message> {
+        self.close_context_menu();
+        let removed = self.tabs.remove(index);
+        let was_active = self.tab_model.active() == removed.entity;
+        // The neighbour that takes over when the active tab is closed.
+        let next = self
+            .tabs
+            .get(index)
+            .or_else(|| index.checked_sub(1).and_then(|i| self.tabs.get(i)))
+            .map(|tab| tab.entity);
+        self.tab_model.remove(removed.entity);
+        drop(removed);
+        match next {
+            Some(entity) => {
+                if was_active {
+                    self.tab_model.activate(entity);
+                    if let Some(tab) = self.active_tab() {
+                        tab.sync_focus();
+                    }
+                }
+                self.focus_task()
+            }
+            None => {
+                // Nothing left: prepare a fresh shell for the next toggle and hide.
+                let fresh = self.new_tab();
+                Task::batch([fresh, self.hide()])
+            }
+        }
+    }
+
+    fn activate_tab(&mut self, entity: segmented_button::Entity) -> Task<Message> {
+        if self.tab_model.active() == entity || !self.tabs.iter().any(|t| t.entity == entity) {
+            return Task::none();
+        }
+        self.close_context_menu();
+        if let Some(tab) = self.active_tab() {
+            tab.unfocus_all();
+        }
+        self.tab_model.activate(entity);
+        if let Some(tab) = self.active_tab() {
+            tab.sync_focus();
+        }
+        self.focus_task()
+    }
+
+    /// Switch to the tab `offset` positions away (wraps around).
+    fn cycle_tab(&mut self, offset: isize) -> Task<Message> {
+        let count = self.tabs.len() as isize;
+        let Some(current) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.entity == self.tab_model.active())
+        else {
+            return Task::none();
+        };
+        let target = (current as isize + offset).rem_euclid(count) as usize;
+        let entity = self.tabs[target].entity;
+        self.activate_tab(entity)
+    }
+
+    /// Name a tab after the title its focused terminal reports (e.g. the running program).
+    fn set_tab_title(&mut self, id: TerminalId, title: String) {
+        let entity = self
+            .tabs
+            .iter()
+            .find(|tab| tab.focused().is_some_and(|pane| pane.id == id))
+            .map(|tab| tab.entity);
+        if let Some(entity) = entity {
+            self.tab_model.text_set(entity, title);
+        }
+    }
+
+    fn focus_pane(&mut self, pane: pane_grid::Pane) -> Task<Message> {
+        if let Some(tab) = self.active_tab_mut() {
+            if tab.panes.get(pane).is_some() && tab.focus != pane {
+                tab.focus = pane;
+                tab.sync_focus();
+            }
+        }
+        self.focus_task()
+    }
+
+    /// Remember a new or changed output and refresh everything derived from the list.
+    fn update_output(&mut self, event: OutputEvent, output: WlOutput) {
+        match event {
+            OutputEvent::Created(Some(info)) | OutputEvent::InfoUpdate(info) => {
+                let name = info
+                    .name
+                    .clone()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| format!("{} {}", info.make, info.model).trim().to_string());
+                match self.outputs.iter_mut().find(|e| e.output == output) {
+                    Some(entry) => entry.name = name,
+                    None => self.outputs.push(OutputEntry { output, name }),
+                }
+            }
+            OutputEvent::Created(None) => {}
+            OutputEvent::Removed => self.outputs.retain(|e| e.output != output),
+        }
+        self.outputs.sort_by(|a, b| a.name.cmp(&b.name));
+        self.monitor_choices = std::iter::once(fl!("settings-monitor-active"))
+            .chain(self.outputs.iter().map(|e| e.name.clone()))
+            .collect();
+        if let Ok(mut names) = dbus::MONITOR_NAMES.lock() {
+            *names = self.outputs.iter().map(|e| e.name.clone()).collect();
+        }
+    }
+
+    /// The output to map the surface on: the configured one if it is connected,
+    /// otherwise whatever the compositor considers the active output.
+    fn selected_output(&self) -> IcedOutput {
+        self.outputs
+            .iter()
+            .find(|e| !self.quake.monitor.is_empty() && e.name == self.quake.monitor)
+            .map_or(IcedOutput::Active, |e| IcedOutput::Output(e.output.clone()))
     }
 
     /// Make the text fields show the draft values again.
@@ -526,10 +863,18 @@ impl Quake {
                     .then(|| stored.set_width_percent(handler, new.width_percent)),
                 (new.animation_ms != old.animation_ms)
                     .then(|| stored.set_animation_ms(handler, new.animation_ms)),
+                (new.monitor != old.monitor)
+                    .then(|| stored.set_monitor(handler, new.monitor.clone())),
             ];
             for err in results.into_iter().flatten().filter_map(Result::err) {
                 log::warn!("failed to save settings: {err}");
             }
+        }
+        // A different monitor needs a new surface on that output.
+        if new.monitor != old.monitor && self.surface.is_some() {
+            let hide = self.hide_now();
+            let show = self.show();
+            return Task::batch([hide, show]);
         }
         let resized = new.height_percent != old.height_percent
             || new.width_percent != old.width_percent;
@@ -574,7 +919,7 @@ impl Quake {
                 self.start_slide(SlideDir::In);
                 return Task::batch([
                     set_keyboard_interactivity(id, KeyboardInteractivity::OnDemand),
-                    widget::text_input::focus(self.terminal_id.clone()),
+                    self.focus_task(),
                 ]);
             }
             return Task::none();
@@ -599,7 +944,7 @@ impl Quake {
                 // OnDemand in `Message::Settle` so other windows stay clickable.
                 keyboard_interactivity: KeyboardInteractivity::Exclusive,
                 anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
-                output: IcedOutput::Active,
+                output: self.selected_output(),
                 namespace: "cosmic-quake-term".into(),
                 size: Some((None, None)),
                 size_limits: cosmic::iced::core::layout::Limits::NONE
@@ -609,7 +954,7 @@ impl Quake {
                     .max_height(16384.0),
                 ..Default::default()
             }),
-            widget::text_input::focus(self.terminal_id.clone()),
+            self.focus_task(),
             Task::perform(
                 async move {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -695,8 +1040,7 @@ impl Quake {
         // only lights up while the pointer is on it or a drag is in progress.
         let highlighted = self.handle_hover || self.resizing;
         let idle = self
-            .terminal
-            .as_ref()
+            .focused_terminal()
             .map(|terminal| {
                 let terminal = terminal.lock().unwrap();
                 let bg = terminal.metadata_set[terminal.default_attrs().metadata].bg;
@@ -779,6 +1123,18 @@ impl Quake {
             .add(field_row(fl!("settings-height"), Field::Height))
             .add(field_row(fl!("settings-width"), Field::Width));
 
+        let selected = if draft.monitor.is_empty() {
+            Some(0)
+        } else {
+            self.monitor_choices.iter().position(|name| *name == draft.monitor)
+        };
+        let monitor = widget::settings::section()
+            .title(fl!("settings-monitor"))
+            .add(widget::settings::item(
+                fl!("settings-monitor"),
+                widget::dropdown(&self.monitor_choices, selected, Message::MonitorSelected),
+            ));
+
         let mut animation = widget::settings::section()
             .title(fl!("settings-animation"))
             .add(widget::settings::item(
@@ -801,6 +1157,7 @@ impl Quake {
         let page = widget::column::with_children(vec![
             header.into(),
             size.into(),
+            monitor.into(),
             animation.into(),
             widget::button::standard(fl!("settings-reset"))
                 .on_press(Message::SettingsReset)
@@ -824,9 +1181,38 @@ impl Quake {
             .into()
     }
 
+    /// The tab strip (shown when there is more than one tab) with a "new tab" button.
+    fn tab_bar(&self) -> Element<'_, Message> {
+        let theme = cosmic::theme::active();
+        let cosmic = theme.cosmic();
+        let background = Color::from(cosmic.background(self.frosted()).base);
+        let bar = widget::tab_bar::horizontal(&self.tab_model)
+            .button_height(32)
+            .button_spacing(cosmic.space_xxs())
+            .on_activate(Message::TabActivate)
+            .on_close(Message::TabClose);
+        let add = widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+            .on_press(Message::NewTab);
+        widget::container(
+            widget::row::with_children(vec![
+                widget::container(bar).width(Length::Fill).into(),
+                add.into(),
+            ])
+            .align_y(cosmic::iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::custom(move |_| {
+            widget::container::Style {
+                background: Some(background.into()),
+                ..Default::default()
+            }
+        }))
+        .into()
+    }
+
     fn close_context_menu(&mut self) {
         self.context_menu = None;
-        if let Some(terminal) = &self.terminal {
+        for terminal in self.all_terminals() {
             terminal.lock().unwrap().context_menu = None;
         }
     }
@@ -834,7 +1220,7 @@ impl Quake {
     fn run_action(&mut self, action: Action) -> Task<Message> {
         match action {
             Action::Copy => {
-                if let Some(terminal) = &self.terminal {
+                if let Some(terminal) = self.focused_terminal() {
                     let terminal = terminal.lock().unwrap();
                     let term = terminal.term.lock();
                     if let Some(text) = term.selection_to_string() {
@@ -846,13 +1232,25 @@ impl Quake {
             Action::Paste => self.update(Message::Paste),
             Action::Settings => self.update(Message::SettingsOpen),
             Action::SelectAll => {
-                if let Some(terminal) = &self.terminal {
+                if let Some(terminal) = self.focused_terminal() {
                     let mut terminal = terminal.lock().unwrap();
                     terminal.select_all();
                     terminal.needs_update = true;
                 }
                 Task::none()
             }
+            Action::NewTab => self.update(Message::NewTab),
+            Action::ClosePane => self.update(Message::ClosePane),
+            Action::SplitHorizontal => self.update(Message::Split(pane_grid::Axis::Horizontal)),
+            Action::SplitVertical => self.update(Message::Split(pane_grid::Axis::Vertical)),
+            Action::NextTab => self.update(Message::NextTab),
+            Action::PrevTab => self.update(Message::PrevTab),
+            Action::ActivateTab(index) => self.update(Message::ActivateTabIndex(index)),
+            Action::FocusLeft => self.update(Message::FocusPane(pane_grid::Direction::Left)),
+            Action::FocusRight => self.update(Message::FocusPane(pane_grid::Direction::Right)),
+            Action::FocusUp => self.update(Message::FocusPane(pane_grid::Direction::Up)),
+            Action::FocusDown => self.update(Message::FocusPane(pane_grid::Direction::Down)),
+            Action::ToggleMaximize => self.update(Message::ToggleMaximize),
             Action::ZoomIn => self.update(Message::Zoom(1)),
             Action::ZoomOut => self.update(Message::Zoom(-1)),
             Action::ZoomReset => self.update(Message::ZoomReset),
@@ -862,7 +1260,8 @@ impl Quake {
 
 /// Receiver for terminal events. Created in `init` (so the shell can start before
 /// the first frame) and taken over by the event subscription.
-static TERM_EVENT_RX: Mutex<Option<mpsc::UnboundedReceiver<TermEvent>>> = Mutex::new(None);
+static TERM_EVENT_RX: Mutex<Option<mpsc::UnboundedReceiver<(TerminalId, TermEvent)>>> =
+    Mutex::new(None);
 
 struct TerminalEventSubscription;
 struct ConfigSubscription;
@@ -888,6 +1287,9 @@ impl Application for Quake {
         // measuring surface and the transparent area below the terminal while
         // dragging. We request blur ourselves, limited to the terminal rectangle.
         core.set_auto_blur(Default::default());
+        // Terminal events carry the id of the terminal they belong to.
+        let (term_tx, rx) = mpsc::unbounded_channel();
+        *TERM_EVENT_RX.lock().unwrap() = Some(rx);
         let mut app = Quake {
             core,
             config_handler: flags.config_handler,
@@ -895,9 +1297,10 @@ impl Application for Quake {
             themes: HashMap::new(),
             term_config: term::Config::default(),
             key_binds: default_key_binds(),
-            terminal: None,
-            term_tx: None,
-            terminal_id: widget::Id::unique(),
+            tabs: Vec::new(),
+            tab_model: segmented_button::ModelBuilder::default().build(),
+            next_terminal_id: 0,
+            term_tx,
             surface: None,
             context_menu: None,
             quake: flags.quake.clone(),
@@ -907,6 +1310,8 @@ impl Application for Quake {
             surface_width: None,
             surface_height: 0,
             resizing: false,
+            outputs: Vec::new(),
+            monitor_choices: vec![fl!("settings-monitor-active")],
             settings_open: false,
             field_text: Default::default(),
             draft: flags.quake.clone(),
@@ -923,11 +1328,8 @@ impl Application for Quake {
         };
         app.update_theme_state();
         app.sync_field_text();
-        // Start the shell right away so the very first frame already shows the terminal.
-        let (tx, rx) = mpsc::unbounded_channel();
-        *TERM_EVENT_RX.lock().unwrap() = Some(rx);
-        app.term_tx = Some(tx.clone());
-        app.spawn_terminal(tx);
+        // Start the first shell right away so the very first frame already shows it.
+        let _ = app.new_tab();
         let task = if flags.start_visible {
             app.show()
         } else {
@@ -942,7 +1344,7 @@ impl Application for Quake {
                 if self.config != *config {
                     self.config = *config;
                     self.update_theme_state();
-                    if let Some(terminal) = &self.terminal {
+                    for terminal in self.all_terminals() {
                         terminal
                             .lock()
                             .unwrap()
@@ -951,18 +1353,24 @@ impl Application for Quake {
                     return cosmic::command::set_theme(self.config.app_theme.theme());
                 }
             }
-            Message::ContextMenu(menu_state) => {
-                if let Some(terminal) = &self.terminal {
-                    terminal.lock().unwrap().context_menu = menu_state.clone();
+            Message::ContextMenu(pane, menu_state) => {
+                self.close_context_menu();
+                if let Some(state) = menu_state {
+                    // A right click focuses the pane it happened in.
+                    let focus = self.focus_pane(pane);
+                    if let Some(terminal) = self.focused_terminal() {
+                        terminal.lock().unwrap().context_menu = Some(state.clone());
+                    }
+                    self.context_menu = Some((pane, state));
+                    return focus;
                 }
-                self.context_menu = menu_state;
             }
             Message::MenuAction(action) => {
                 self.close_context_menu();
                 return self.run_action(action);
             }
             Message::OpenLink => {
-                let link = self.context_menu.as_ref().and_then(|m| m.link.clone());
+                let link = self.context_menu.as_ref().and_then(|(_, m)| m.link.clone());
                 self.close_context_menu();
                 if let Some(link) = link {
                     if let Err(err) = open::that_detached(&link) {
@@ -971,7 +1379,7 @@ impl Application for Quake {
                 }
             }
             Message::CopyLink => {
-                let link = self.context_menu.as_ref().and_then(|m| m.link.clone());
+                let link = self.context_menu.as_ref().and_then(|(_, m)| m.link.clone());
                 self.close_context_menu();
                 if let Some(link) = link {
                     return clipboard::write(link);
@@ -1004,11 +1412,11 @@ impl Application for Quake {
                 });
             }
             Message::PasteValue(value) => {
-                if let Some(terminal) = &self.terminal {
+                if let Some(terminal) = self.focused_terminal() {
                     terminal.lock().unwrap().paste(value);
                 }
             }
-            Message::TermEvent(event) => match event {
+            Message::TermEvent(id, event) => match event {
                 TermEvent::ClipboardLoad(kind, callback) => {
                     if let term::ClipboardType::Clipboard = kind {
                         return clipboard::read().map(move |data| {
@@ -1023,52 +1431,113 @@ impl Application for Quake {
                     }
                 }
                 TermEvent::ColorRequest(index, f) => {
-                    if let Some(terminal) = &self.terminal {
+                    if let Some(terminal) = self.terminal_by_id(id) {
                         let terminal = terminal.lock().unwrap();
                         let rgb = terminal.colors()[index].unwrap_or_default();
                         terminal.input_no_scroll(f(rgb).into_bytes());
                     }
                 }
                 TermEvent::PtyWrite(text) => {
-                    if let Some(terminal) = &self.terminal {
+                    if let Some(terminal) = self.terminal_by_id(id) {
                         terminal.lock().unwrap().input_no_scroll(text.into_bytes());
                     }
                 }
                 TermEvent::TextAreaSizeRequest(f) => {
-                    if let Some(terminal) = &self.terminal {
+                    if let Some(terminal) = self.terminal_by_id(id) {
                         let terminal = terminal.lock().unwrap();
                         terminal.input_no_scroll(f(terminal.size().into()).into_bytes());
                     }
                 }
                 TermEvent::MouseCursorDirty | TermEvent::Wakeup => {
-                    if let Some(terminal) = &self.terminal {
+                    if let Some(terminal) = self.terminal_by_id(id) {
                         terminal.lock().unwrap().needs_update = true;
                     }
                 }
+                TermEvent::Title(title) => self.set_tab_title(id, title),
+                TermEvent::ResetTitle => self.set_tab_title(id, fl!("tab-title")),
                 TermEvent::Exit => {
-                    // The shell ended (e.g. `exit`): hide and start a fresh shell so
-                    // the next toggle shows a working prompt.
-                    self.close_context_menu();
-                    self.terminal = None;
-                    if let Some(tx) = self.term_tx.clone() {
-                        self.spawn_terminal(tx);
-                    }
-                    return self.hide();
+                    // The shell of this terminal ended (e.g. `exit`).
+                    return self.close_terminal(id);
                 }
                 _ => {}
             },
+            Message::NewTab => return self.new_tab(),
+            Message::ClosePane => {
+                let id = self.active_tab().and_then(Tab::focused).map(|pane| pane.id);
+                if let Some(id) = id {
+                    return self.close_terminal(id);
+                }
+            }
+            Message::Split(axis) => return self.split(axis),
+            Message::TabActivate(entity) => return self.activate_tab(entity),
+            Message::TabClose(entity) => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.entity == entity) {
+                    return self.close_tab_at(index);
+                }
+            }
+            Message::NextTab => return self.cycle_tab(1),
+            Message::PrevTab => return self.cycle_tab(-1),
+            Message::ActivateTabIndex(index) => {
+                if let Some(entity) = self.tabs.get(index).map(|tab| tab.entity) {
+                    return self.activate_tab(entity);
+                }
+            }
+            Message::FocusPane(direction) => {
+                let adjacent = self
+                    .active_tab()
+                    .and_then(|tab| tab.panes.adjacent(tab.focus, direction));
+                if let Some(pane) = adjacent {
+                    return self.focus_pane(pane);
+                }
+            }
+            Message::ToggleMaximize => {
+                if let Some(tab) = self.active_tab_mut() {
+                    if tab.panes.maximized().is_some() {
+                        tab.panes.restore();
+                    } else {
+                        let focus = tab.focus;
+                        tab.panes.maximize(focus);
+                    }
+                }
+                return self.focus_task();
+            }
+            Message::PaneClicked(pane) => return self.focus_pane(pane),
+            Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.panes.resize(split, ratio);
+                }
+            }
+            Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.panes.drop(pane, target);
+                }
+            }
+            Message::PaneDragged(_) => {}
             Message::Dbus(command) => {
                 return match command {
                     dbus::Command::Toggle => self.update(Message::Toggle),
                     dbus::Command::Show => self.show(),
                     dbus::Command::Hide => self.hide(),
                     dbus::Command::Quit => cosmic::iced::exit(),
+                    dbus::Command::NewTab => {
+                        let show = self.show();
+                        return Task::batch([show, self.new_tab()]);
+                    }
+                    dbus::Command::SplitHorizontal => {
+                        let show = self.show();
+                        return Task::batch([show, self.split(pane_grid::Axis::Horizontal)]);
+                    }
+                    dbus::Command::SplitVertical => {
+                        let show = self.show();
+                        return Task::batch([show, self.split(pane_grid::Axis::Vertical)]);
+                    }
                 };
             }
             Message::QuakeConfig(config) => {
                 if self.quake != *config {
                     let resized = self.quake.height_percent != config.height_percent
-                        || self.quake.width_percent != config.width_percent;
+                        || self.quake.width_percent != config.width_percent
+                        || self.quake.monitor != config.monitor;
                     self.quake = *config;
                     // Re-map the surface so the new size takes effect immediately.
                     // (Animation settings are simply picked up on the next show/hide.)
@@ -1111,7 +1580,7 @@ impl Application for Quake {
                         set_anchor(id, anchor),
                         set_size(id, width, Some(height)),
                         self.blur_task(id, visible),
-                        widget::text_input::focus(self.terminal_id.clone()),
+                        self.focus_task(),
                     ]);
                 }
             }
@@ -1185,7 +1654,7 @@ impl Application for Quake {
             Message::SettingsClose => {
                 self.settings_open = false;
                 // The terminal widget was out of the tree; give it the focus back.
-                return widget::text_input::focus(self.terminal_id.clone());
+                return self.focus_task();
             }
             Message::Draft(field, value) => {
                 field.set(&mut self.draft, value.round() as u16);
@@ -1206,6 +1675,15 @@ impl Application for Quake {
                     // Empty or unparsable: show the current value again.
                     Err(_) => self.sync_field_text(),
                 }
+            }
+            Message::Output(event, output) => self.update_output(event, output),
+            Message::MonitorSelected(index) => {
+                let mut new = self.draft.clone();
+                new.monitor = match index {
+                    0 => String::new(),
+                    _ => self.monitor_choices.get(index).cloned().unwrap_or_default(),
+                };
+                return self.commit_quake(new);
             }
             Message::AnimationToggle(on) => {
                 let mut new = self.draft.clone();
@@ -1243,7 +1721,7 @@ impl Application for Quake {
             Message::Settle(id) => {
                 if self.surface == Some(id) && self.is_shown() {
                     return Task::batch([
-                        widget::text_input::focus(self.terminal_id.clone()),
+                        self.focus_task(),
                         set_keyboard_interactivity(id, KeyboardInteractivity::OnDemand),
                     ]);
                 }
@@ -1256,15 +1734,38 @@ impl Application for Quake {
                 };
             }
             Message::Zoom(delta) => {
-                if let Some(terminal) = &self.terminal {
+                if let Some(terminal) = self.focused_terminal() {
                     let mut terminal = terminal.lock().unwrap();
                     let zoom = terminal.zoom_adj().saturating_add(delta);
                     terminal.set_zoom_adj(zoom);
                     terminal.set_config(&self.config, &self.themes);
                 }
             }
+            Message::ZoomPane(pane, delta) => {
+                let terminal = self
+                    .active_tab()
+                    .and_then(|tab| tab.panes.get(pane))
+                    .map(|pane| &pane.terminal);
+                if let Some(terminal) = terminal {
+                    let mut terminal = terminal.lock().unwrap();
+                    let zoom = terminal.zoom_adj().saturating_add(delta);
+                    terminal.set_zoom_adj(zoom);
+                    terminal.set_config(&self.config, &self.themes);
+                }
+            }
+            Message::ZoomResetPane(pane) => {
+                let terminal = self
+                    .active_tab()
+                    .and_then(|tab| tab.panes.get(pane))
+                    .map(|pane| &pane.terminal);
+                if let Some(terminal) = terminal {
+                    let mut terminal = terminal.lock().unwrap();
+                    terminal.set_zoom_adj(0);
+                    terminal.set_config(&self.config, &self.themes);
+                }
+            }
             Message::ZoomReset => {
-                if let Some(terminal) = &self.terminal {
+                if let Some(terminal) = self.focused_terminal() {
                     let mut terminal = terminal.lock().unwrap();
                     terminal.set_zoom_adj(0);
                     terminal.set_config(&self.config, &self.themes);
@@ -1282,7 +1783,7 @@ impl Application for Quake {
         if self.measuring {
             return widget::space::vertical().into();
         }
-        let Some(terminal) = &self.terminal else {
+        let Some(tab) = self.active_tab() else {
             // Same colour the terminal uses, so there is no flash while it is missing.
             let bg = terminal::WINDOW_BG_COLOR.load(Ordering::SeqCst);
             let color = Color::from_rgb8((bg >> 16) as u8, (bg >> 8) as u8, bg as u8);
@@ -1301,39 +1802,63 @@ impl Application for Quake {
             return self.with_resize_handle(self.settings_view());
         }
         let space_xxs = cosmic::theme::active().cosmic().space_xxs();
-        let mut terminal_box = terminal_box(terminal, &self.key_binds)
-            .id(self.terminal_id.clone())
-            .on_context_menu(Message::ContextMenu)
-            .on_zoom(Message::Zoom)
-            .opacity(self.effective_opacity())
-            .padding(space_xxs)
-            .sharp_corners(true)
-            .show_headerbar(false);
 
-        let Some(menu_state) = &self.context_menu else {
-            return self.with_resize_handle(terminal_box.into());
+        let grid = widget::pane_grid::PaneGrid::new(&tab.panes, |pane, data, _maximized| {
+            let mut terminal_box = terminal_box(&data.terminal, &self.key_binds)
+                .id(data.widget_id.clone())
+                .on_context_menu(move |menu_state| Message::ContextMenu(pane, menu_state))
+                .on_zoom(move |delta| Message::ZoomPane(pane, delta))
+                .on_middle_double_click(move || Message::ZoomResetPane(pane))
+                .opacity(self.effective_opacity())
+                .padding(space_xxs)
+                .sharp_corners(true)
+                .show_headerbar(false);
+
+            let menu = self.context_menu.as_ref().filter(|(menu_pane, _)| *menu_pane == pane);
+            let element: Element<'_, Message> = match menu {
+                None => terminal_box.into(),
+                Some((_, menu_state)) => {
+                    let point = menu_state
+                        .local_position
+                        .or(menu_state.position)
+                        .unwrap_or_default();
+                    // Tell terminal_box a menu is open so the next click dismisses it.
+                    terminal_box = terminal_box.context_menu(point);
+                    let has_selection = data
+                        .terminal
+                        .lock()
+                        .unwrap()
+                        .term
+                        .lock()
+                        .selection_to_string()
+                        .is_some();
+                    widget::popover(terminal_box)
+                        .popup(context_menu(
+                            &self.key_binds,
+                            has_selection,
+                            menu_state.link.clone(),
+                        ))
+                        .position(widget::popover::Position::Point(point))
+                        .into()
+                }
+            };
+            pane_grid::Content::new(element)
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .on_click(Message::PaneClicked)
+        .on_resize(space_xxs, Message::PaneResized)
+        .on_drag(Message::PaneDragged);
+
+        let body: Element<'_, Message> = if self.tabs.len() > 1 {
+            widget::column::with_children(vec![self.tab_bar(), grid.into()])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            grid.into()
         };
-        let point = menu_state
-            .local_position
-            .or(menu_state.position)
-            .unwrap_or_default();
-        // Tell terminal_box a menu is open so the next click dismisses it.
-        terminal_box = terminal_box.context_menu(point);
-        let has_selection = terminal
-            .lock()
-            .unwrap()
-            .term
-            .lock()
-            .selection_to_string()
-            .is_some();
-        let popover = widget::popover(terminal_box)
-            .popup(context_menu(
-                &self.key_binds,
-                has_selection,
-                menu_state.link.clone(),
-            ))
-            .position(widget::popover::Position::Point(point));
-        self.with_resize_handle(popover.into())
+        self.with_resize_handle(body)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -1348,6 +1873,10 @@ impl Application for Quake {
                 Event::Window(
                     window::Event::Opened { size, .. } | window::Event::Resized(size),
                 ) => Some(Message::SurfaceSize(id, size)),
+                Event::PlatformSpecific(PlatformSpecific::Wayland(WaylandEvent::Output(
+                    event,
+                    output,
+                ))) => Some(Message::Output(event, output)),
                 _ => None,
             }),
             Subscription::run_with(TypeId::of::<TerminalEventSubscription>(), |_| {
@@ -1358,8 +1887,8 @@ impl Application for Quake {
                             std::future::pending::<()>().await;
                             return;
                         };
-                        while let Some(event) = rx.recv().await {
-                            output.send(Message::TermEvent(event)).await.unwrap();
+                        while let Some((id, event)) = rx.recv().await {
+                            output.send(Message::TermEvent(id, event)).await.unwrap();
                         }
                         // Keep the stream (and its sender) alive until shutdown.
                         std::future::pending::<()>().await;

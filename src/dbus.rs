@@ -15,6 +15,9 @@ pub enum Command {
     Show,
     Hide,
     Quit,
+    NewTab,
+    SplitHorizontal,
+    SplitVertical,
 }
 
 impl Command {
@@ -24,9 +27,15 @@ impl Command {
             Command::Show => "Show",
             Command::Hide => "Hide",
             Command::Quit => "Quit",
+            Command::NewTab => "NewTab",
+            Command::SplitHorizontal => "SplitHorizontal",
+            Command::SplitVertical => "SplitVertical",
         }
     }
 }
+
+/// Names of the connected outputs, kept up to date by the daemon for `--list-monitors`.
+pub static MONITOR_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 struct Service(UnboundedSender<Command>);
 
@@ -46,6 +55,22 @@ impl Service {
 
     fn quit(&self) {
         let _ = self.0.send(Command::Quit);
+    }
+
+    fn new_tab(&self) {
+        let _ = self.0.send(Command::NewTab);
+    }
+
+    fn split_horizontal(&self) {
+        let _ = self.0.send(Command::SplitHorizontal);
+    }
+
+    fn split_vertical(&self) {
+        let _ = self.0.send(Command::SplitVertical);
+    }
+
+    fn list_monitors(&self) -> Vec<String> {
+        MONITOR_NAMES.lock().map(|names| names.clone()).unwrap_or_default()
     }
 }
 
@@ -81,4 +106,11 @@ pub fn send(command: Command) -> zbus::Result<()> {
     let conn = zbus::blocking::Connection::session()?;
     conn.call_method(Some(NAME), PATH, Some(NAME), command.method(), &())?;
     Ok(())
+}
+
+/// Ask the running daemon which outputs it sees.
+pub fn list_monitors() -> zbus::Result<Vec<String>> {
+    let conn = zbus::blocking::Connection::session()?;
+    let reply = conn.call_method(Some(NAME), PATH, Some(NAME), "ListMonitors", &())?;
+    Ok(reply.body().deserialize::<Vec<String>>()?)
 }

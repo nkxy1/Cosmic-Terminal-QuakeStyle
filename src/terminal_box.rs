@@ -52,6 +52,8 @@ use crate::{
 };
 
 const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Two middle-button presses within this time count as a double click.
+const MIDDLE_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// Drives repeated drag updates while the pointer is outside the widget.
 struct DragAutoscroll {
@@ -120,6 +122,7 @@ pub struct TerminalBox<'a, Message> {
     opacity: Option<f32>,
     mouse_inside_boundary: Option<bool>,
     on_middle_click: Option<Box<dyn Fn() -> Message + 'a>>,
+    on_middle_double_click: Option<Box<dyn Fn() -> Message + 'a>>,
     on_zoom: Option<Box<dyn Fn(i8) -> Message + 'a>>,
     on_open_hyperlink: Option<Box<dyn Fn(String) -> Message + 'a>>,
     on_window_focused: Option<Box<dyn Fn() -> Message + 'a>>,
@@ -147,6 +150,7 @@ where
             opacity: None,
             mouse_inside_boundary: None,
             on_middle_click: None,
+            on_middle_double_click: None,
             on_zoom: None,
             key_binds,
             on_open_hyperlink: None,
@@ -202,6 +206,13 @@ where
 
     pub fn on_middle_click(mut self, on_middle_click: impl Fn() -> Message + 'a) -> Self {
         self.on_middle_click = Some(Box::new(on_middle_click));
+        self
+    }
+
+    /// Called when the middle mouse button is double-clicked (checked before the click is
+    /// forwarded to programs that use the mouse, so it works everywhere).
+    pub fn on_middle_double_click(mut self, on_double_click: impl Fn() -> Message + 'a) -> Self {
+        self.on_middle_double_click = Some(Box::new(on_double_click));
         self
     }
 
@@ -1173,6 +1184,21 @@ where
             }
             Event::Mouse(MouseEvent::ButtonPressed(button)) => {
                 if let Some(p) = cursor_position.position_in(layout.bounds()) {
+                    if *button == Button::Middle {
+                        if let Some(on_double_click) = &self.on_middle_double_click {
+                            let now = Instant::now();
+                            match state.middle_click.take() {
+                                Some(previous)
+                                    if now.duration_since(previous) < MIDDLE_DOUBLE_CLICK =>
+                                {
+                                    shell.publish(on_double_click());
+                                    shell.capture_event();
+                                    return;
+                                }
+                                _ => state.middle_click = Some(now),
+                            }
+                        }
+                    }
                     let x = p.x - self.padding.left;
                     let y = p.y - self.padding.top;
                     //TODO: better calculation of position
@@ -1892,6 +1918,8 @@ pub struct State {
     scroll_pixels: f32,
     /// Fractional wheel notches collected for Ctrl+wheel zoom.
     zoom_wheel: f32,
+    /// When the middle button was last pressed, to recognise a double click.
+    middle_click: Option<Instant>,
     scrollbar_rect: Cell<Rectangle<f32>>,
     autoscroll: DragAutoscroll,
 }
@@ -1906,6 +1934,7 @@ impl State {
             is_focused: false,
             scroll_pixels: 0.0,
             zoom_wheel: 0.0,
+            middle_click: None,
             scrollbar_rect: Cell::new(Rectangle::default()),
             autoscroll: DragAutoscroll::new(AUTOSCROLL_INTERVAL),
         }
