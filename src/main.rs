@@ -382,10 +382,11 @@ enum Message {
     Dbus(dbus::Command),
     Tick(std::time::Instant),
     QuakeConfig(Box<QuakeConfig>),
-    ResizeStart,
-    ResizeMove(f32),
+    ResizeStart(Edge),
+    ResizeMove(Point),
     ResizeEnd,
-    HandleHover(bool),
+    HandleHover(Option<Edge>),
+    ReorderTab(segmented_button::ReorderEvent),
     SettingsOpen,
     SettingsClose,
     SettingsCommit,
@@ -409,10 +410,6 @@ enum Message {
     TermEvent(TerminalId, TermEvent),
     Toggle,
     Zoom(i8),
-    /// Ctrl + wheel over a specific pane.
-    ZoomPane(pane_grid::Pane, i8),
-    /// Double middle click over a specific pane: back to the configured font size.
-    ZoomResetPane(pane_grid::Pane),
     NewTab,
     ClosePane,
     Split(pane_grid::Axis),
@@ -431,6 +428,14 @@ enum Message {
     Settle(window::Id),
     /// First configure or a resize of a layer surface, in logical pixels.
     SurfaceSize(window::Id, cosmic::iced::Size),
+}
+
+/// Which edge of the terminal is being grabbed to resize it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Edge {
+    Bottom,
+    Left,
+    Right,
 }
 
 /// A numeric setting that is edited with a slider and a text field.
@@ -547,14 +552,20 @@ struct Quake {
     /// 0 = fully above the screen, 1 = fully shown.
     slide_progress: f32,
     /// While dragging (and until the final shrink is acknowledged) the content is laid
-    /// out at this height inside a surface that may be taller. The Wayland surface is
+    /// out at this size inside a surface that may be larger. The Wayland surface is
     /// resized only twice per drag (grow at the start, shrink at the end) instead of on
     /// every pointer event, which is what made the window flicker.
-    display_height: Option<f32>,
+    display_size: Option<(f32, f32)>,
+    /// Edge being dragged.
+    resize_edge: Option<Edge>,
+    /// For side drags: the surface has grown to the full width, pointer x is meaningful.
+    resize_ready: bool,
+    /// Width in pixels while dragging (the surface itself may be wider).
+    drag_width: f32,
     /// The final shrink was requested and its configure has not arrived yet.
     shrink_pending: bool,
     /// Pointer is over the grab strip.
-    handle_hover: bool,
+    handle_hover: Option<Edge>,
 }
 
 impl Quake {
@@ -654,6 +665,7 @@ impl Quake {
             None,
         ) {
             Ok(mut terminal) => {
+                terminal.set_zoom_adj(self.quake.zoom);
                 terminal.set_config(&self.config, &self.themes);
                 Some(TermPane {
                     id,
@@ -794,6 +806,33 @@ impl Quake {
         let target = (current as isize + offset).rem_euclid(count) as usize;
         let entity = self.tabs[target].entity;
         self.activate_tab(entity)
+    }
+
+    /// Set the font zoom (steps relative to the configured size) for all terminals and
+    /// store it. `self.quake` is updated before saving so the config watcher's echo is
+    /// a no-op.
+    fn apply_zoom(&mut self, zoom: i32) {
+        let zoom = zoom.clamp(i32::from(settings::MIN_ZOOM), i32::from(settings::MAX_ZOOM)) as i8;
+        if zoom == self.quake.zoom {
+            return;
+        }
+        self.quake.zoom = zoom;
+        self.draft.zoom = zoom;
+        self.apply_zoom_to_terminals();
+        if let Some(handler) = &self.quake_handler {
+            let mut stored = self.quake.clone();
+            if let Err(err) = stored.set_zoom(handler, zoom) {
+                log::warn!("failed to save zoom: {err}");
+            }
+        }
+    }
+
+    fn apply_zoom_to_terminals(&self) {
+        for terminal in self.all_terminals() {
+            let mut terminal = terminal.lock().unwrap();
+            terminal.set_zoom_adj(self.quake.zoom);
+            terminal.set_config(&self.config, &self.themes);
+        }
     }
 
     /// Name a tab after the title its focused terminal reports (e.g. the running program).
@@ -1019,9 +1058,10 @@ impl Quake {
         self.slide_progress = 1.0;
         self.measuring = false;
         self.resizing = false;
-        self.display_height = None;
+        self.display_size = None;
+        self.resize_edge = None;
         self.shrink_pending = false;
-        self.handle_hover = false;
+        self.handle_hover = None;
         match self.surface.take() {
             Some(id) => destroy_layer_surface(id),
             None => Task::none(),
@@ -1049,27 +1089,31 @@ impl Quake {
 
     /// Blur only the area the terminal actually covers.
     fn blur_task(&self, id: window::Id, height: f32) -> Task<Message> {
-        if !self.frosted() {
-            return Task::none();
-        }
         let width = self
             .surface_width
             .map(|w| w as f32)
             .or(self.output_size.map(|(w, _)| w))
             .unwrap_or(0.0);
+        self.blur_rect(id, 0.0, width, height)
+    }
+
+    /// Blur the rectangle `x`, 0, `width` x `height` of the surface. The terminal is
+    /// centered in the surface while a side edge is dragged, so `x` is not always 0.
+    fn blur_rect(&self, id: window::Id, x: f32, width: f32, height: f32) -> Task<Message> {
+        if !self.frosted() {
+            return Task::none();
+        }
         blur(
             id,
-            Some(vec![Rectangle::new(Point::ORIGIN, Size::new(width, height))]),
+            Some(vec![Rectangle::new(Point::new(x, 0.0), Size::new(width, height))]),
         )
         .map(|()| cosmic::Action::None)
     }
 
-    /// Put a thin grab strip under the terminal; dragging it resizes the surface.
+    /// Put thin grab strips on the left, right and bottom edge; dragging one resizes the
+    /// terminal. At rest they are painted like the terminal; they light up on hover.
     fn with_resize_handle<'a>(&self, content: Element<'a, Message>) -> Element<'a, Message> {
-        const HANDLE_HEIGHT: f32 = 6.0;
-        // At rest the strip is painted like the terminal so it is not noticeable; it
-        // only lights up while the pointer is on it or a drag is in progress.
-        let highlighted = self.handle_hover || self.resizing;
+        const HANDLE: f32 = 6.0;
         let idle = self
             .focused_terminal()
             .map(|terminal| {
@@ -1078,35 +1122,69 @@ impl Quake {
                 Color::from_rgba8(bg.r(), bg.g(), bg.b(), self.effective_opacity())
             })
             .unwrap_or(Color::TRANSPARENT);
-        let strip = widget::container(widget::space::vertical())
-            .width(Length::Fill)
-            .height(Length::Fixed(HANDLE_HEIGHT))
-            .class(cosmic::theme::Container::custom(move |theme| {
-                let color = if highlighted {
-                    Color::from(theme.cosmic().accent_color())
-                } else {
-                    idle
-                };
-                widget::container::Style {
-                    background: Some(color.into()),
-                    ..Default::default()
-                }
-            }));
-        let handle = widget::mouse_area(strip)
-            .on_enter(Message::HandleHover(true))
-            .on_exit(Message::HandleHover(false))
-            .on_press(Message::ResizeStart)
-            .interaction(mouse::Interaction::ResizingVertically);
-        let column = widget::column::with_children(vec![content, handle.into()])
+
+        let strip = |edge: Edge| -> Element<'a, Message> {
+            let highlighted = self.handle_hover == Some(edge) || self.resize_edge == Some(edge);
+            let (width, height, cursor) = match edge {
+                Edge::Bottom => (
+                    Length::Fill,
+                    Length::Fixed(HANDLE),
+                    mouse::Interaction::ResizingVertically,
+                ),
+                Edge::Left | Edge::Right => (
+                    Length::Fixed(HANDLE),
+                    Length::Fill,
+                    mouse::Interaction::ResizingHorizontally,
+                ),
+            };
+            let visual = widget::container(widget::space::vertical())
+                .width(width)
+                .height(height)
+                .class(cosmic::theme::Container::custom(move |theme| {
+                    let color = if highlighted {
+                        Color::from(theme.cosmic().accent_color())
+                    } else {
+                        idle
+                    };
+                    widget::container::Style {
+                        background: Some(color.into()),
+                        ..Default::default()
+                    }
+                }));
+            widget::mouse_area(visual)
+                .on_enter(Message::HandleHover(Some(edge)))
+                .on_exit(Message::HandleHover(None))
+                .on_press(Message::ResizeStart(edge))
+                .interaction(cursor)
+                .into()
+        };
+
+        let middle = widget::row::with_children(vec![
+            strip(Edge::Left),
+            widget::container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            strip(Edge::Right),
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill);
+        let column = widget::column::with_children(vec![middle.into(), strip(Edge::Bottom)])
             .width(Length::Fill)
             .height(Length::Fill);
-        let framed: Element<'a, Message> = match self.display_height {
-            // Surface is taller than the terminal: draw only the top part, the rest
-            // of the surface stays transparent.
-            Some(height) => widget::container(column)
-                .width(Length::Fill)
-                .height(Length::Fixed(height))
-                .into(),
+
+        let framed: Element<'a, Message> = match self.display_size {
+            // The surface is larger than the terminal while dragging: draw the terminal
+            // at its size, centered at the top, and leave the rest transparent.
+            Some((width, height)) => widget::container(
+                widget::container(column)
+                    .width(Length::Fixed(width))
+                    .height(Length::Fixed(height)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(cosmic::iced::Alignment::Center)
+            .into(),
             None => column.into(),
         };
         // Slide animation: translate the content up by the part that is still hidden.
@@ -1228,6 +1306,9 @@ impl Quake {
         let bar = widget::tab_bar::horizontal(&self.tab_model)
             .button_height(32)
             .button_spacing(cosmic.space_xxs())
+            .enable_tab_drag(String::from("x-cosmic-quake-term/tab"))
+            .on_reorder(Message::ReorderTab)
+            .tab_drag_threshold(25.0)
             .on_activate(Message::TabActivate)
             .on_close(Message::TabClose);
         let add = widget::button::icon(widget::icon::from_name("list-add-symbolic"))
@@ -1361,9 +1442,12 @@ impl Application for Quake {
             },
             slide: None,
             slide_progress: 1.0,
-            display_height: None,
+            display_size: None,
+            resize_edge: None,
+            resize_ready: false,
+            drag_width: 0.0,
             shrink_pending: false,
-            handle_hover: false,
+            handle_hover: None,
         };
         app.update_theme_state();
         app.sync_field_text();
@@ -1578,10 +1662,14 @@ impl Application for Quake {
             }
             Message::QuakeConfig(config) => {
                 if self.quake != *config {
+                    let zoom_changed = self.quake.zoom != config.zoom;
                     let resized = self.quake.height_percent != config.height_percent
                         || self.quake.width_percent != config.width_percent
                         || self.quake.monitor != config.monitor;
                     self.quake = *config;
+                    if zoom_changed {
+                        self.apply_zoom_to_terminals();
+                    }
                     // Re-map the surface so the new size takes effect immediately.
                     // (Animation settings are simply picked up on the next show/hide.)
                     if resized && self.surface.is_some() {
@@ -1595,9 +1683,34 @@ impl Application for Quake {
                 if self.shrink_pending && !self.resizing && self.surface == Some(id) =>
             {
                 // Ignore configures that are still about the earlier grow.
-                if (size.height - self.surface_height as f32).abs() < 1.5 {
+                let wanted_width = self
+                    .surface_width
+                    .map(|w| w as f32)
+                    .or(self.output_size.map(|(w, _)| w))
+                    .unwrap_or(size.width);
+                if (size.height - self.surface_height as f32).abs() < 1.5
+                    && (size.width - wanted_width).abs() < 1.5
+                {
                     self.shrink_pending = false;
-                    self.display_height = None;
+                    self.display_size = None;
+                    // The surface has its final size: the terminal starts at x = 0 again.
+                    return self.blur_task(id, self.surface_height as f32);
+                }
+            }
+            Message::SurfaceSize(id, size)
+                if self.resizing
+                    && !self.resize_ready
+                    && self.surface == Some(id)
+                    && self
+                        .output_size
+                        .is_some_and(|(output_w, _)| size.width >= output_w - 1.5) =>
+            {
+                // The surface now spans the full width: pointer x is the real position, and
+                // the terminal sits in the middle of it, so the blur has to move there.
+                self.resize_ready = true;
+                if let Some((output_w, _)) = self.output_size {
+                    let x = ((output_w - self.drag_width) / 2.0).max(0.0);
+                    return self.blur_rect(id, x, self.drag_width, self.surface_height as f32);
                 }
             }
             Message::SurfaceSize(id, size) => {
@@ -1627,67 +1740,131 @@ impl Application for Quake {
                     ]);
                 }
             }
-            Message::ResizeStart => {
-                if let (Some(id), false, true, Some((_, output_h))) =
+            Message::ResizeStart(edge) => {
+                if let (Some(id), false, true, Some((output_w, output_h))) =
                     (self.surface, self.measuring, self.slide.is_none(), self.output_size)
                 {
                     self.resizing = true;
+                    self.resize_edge = Some(edge);
                     self.shrink_pending = false;
-                    // Keep showing the content at its current height, then grow the
-                    // surface to the full output height once.
-                    self.display_height = Some(self.surface_height as f32);
-                    return set_size(id, self.surface_width, Some(output_h.ceil() as u32));
+                    let width = self.surface_width.map_or(output_w, |w| w as f32);
+                    self.drag_width = width;
+                    // Keep showing the content at its current size, then grow the surface
+                    // once: to the full height for the bottom edge, to the full width for
+                    // the side edges. While dragging only the layout changes.
+                    self.display_size = Some((width, self.surface_height as f32));
+                    return match edge {
+                        Edge::Bottom => {
+                            self.resize_ready = true;
+                            set_size(id, self.surface_width, Some(output_h.ceil() as u32))
+                        }
+                        Edge::Left | Edge::Right => {
+                            // Already full width: no configure will follow, ready now.
+                            self.resize_ready = self.surface_width.is_none();
+                            Task::batch([
+                                set_anchor(id, Anchor::TOP | Anchor::LEFT | Anchor::RIGHT),
+                                set_size(id, None, Some(self.surface_height)),
+                            ])
+                        }
+                    };
                 }
             }
-            Message::ResizeMove(y) => {
-                // The surface is anchored to the top, so the pointer's y coordinate
-                // inside it is exactly the height the user is asking for. Only the
-                // layout changes here; no Wayland request is sent.
-                if let (true, Some((_, output_h))) = (self.resizing, self.output_size) {
-                    let min = output_h * f32::from(settings::MIN_PERCENT) / 100.0;
-                    let height = y.clamp(min, output_h).round();
-                    let changed = self.surface_height != height as u32;
-                    self.surface_height = height as u32;
-                    self.display_height = Some(height);
-                    if let (true, Some(id)) = (changed, self.surface) {
-                        return self.blur_task(id, height);
+            Message::ResizeMove(point) => {
+                let (true, Some(edge), Some((output_w, output_h)), Some(id)) =
+                    (self.resizing, self.resize_edge, self.output_size, self.surface)
+                else {
+                    return Task::none();
+                };
+                let min = f32::from(settings::MIN_PERCENT) / 100.0;
+                match edge {
+                    // Anchored to the top: the pointer's y inside the surface is the height.
+                    Edge::Bottom => {
+                        self.surface_height =
+                            point.y.clamp(output_h * min, output_h).round() as u32;
+                    }
+                    // Centered: the distance from the middle is half the width.
+                    Edge::Left | Edge::Right => {
+                        if !self.resize_ready {
+                            return Task::none();
+                        }
+                        self.drag_width = (2.0 * (point.x - output_w / 2.0).abs())
+                            .clamp(output_w * min, output_w)
+                            .round();
                     }
                 }
+                let height = self.surface_height as f32;
+                self.display_size = Some((self.drag_width, height));
+                // The surface is as wide as the output for side drags, otherwise as wide as
+                // the terminal; the terminal is centered in it.
+                let surface_width = match edge {
+                    Edge::Bottom => self.surface_width.map_or(output_w, |w| w as f32),
+                    Edge::Left | Edge::Right => output_w,
+                };
+                let x = ((surface_width - self.drag_width) / 2.0).max(0.0);
+                return self.blur_rect(id, x, self.drag_width, height);
             }
             Message::ResizeEnd => {
                 if !self.resizing {
                     return Task::none();
                 }
                 self.resizing = false;
+                let edge = self.resize_edge.take();
                 let (Some(id), Some(output)) = (self.surface, self.output_size) else {
                     return Task::none();
                 };
-                let percent = settings::clamp_percent(
-                    (self.surface_height as f32 / output.1 * 100.0).round() as u16,
-                );
-                // Save, then snap to the stored percentage so what you see is what a
-                // fresh start will give. `self.quake` is updated first so the config
-                // watcher's echo is recognised as "no change" and does not re-map us.
-                self.quake.height_percent = percent;
-                if let Some(handler) = &self.quake_handler {
-                    let mut stored = self.quake.clone();
-                    if let Err(err) = stored.set_height_percent(handler, percent) {
-                        log::warn!("failed to save height: {err}");
+                // Save the dragged dimension, then snap to the stored percentages so what
+                // you see is what a fresh start will give. `self.quake` is updated first
+                // so the config watcher's echo is a no-op and does not re-map the surface.
+                let mut stored = self.quake.clone();
+                let mut errors = Vec::new();
+                if edge == Some(Edge::Bottom) {
+                    let percent = settings::clamp_percent(
+                        (self.surface_height as f32 / output.1 * 100.0).round() as u16,
+                    );
+                    self.quake.height_percent = percent;
+                    self.draft.height_percent = percent;
+                    if let Some(handler) = &self.quake_handler {
+                        errors.extend(stored.set_height_percent(handler, percent).err());
+                    }
+                } else if edge.is_some() {
+                    let percent = settings::clamp_percent(
+                        (self.drag_width / output.0 * 100.0).round() as u16,
+                    );
+                    self.quake.width_percent = percent;
+                    self.draft.width_percent = percent;
+                    if let Some(handler) = &self.quake_handler {
+                        errors.extend(stored.set_width_percent(handler, percent).err());
                     }
                 }
+                for err in errors {
+                    log::warn!("failed to save size: {err}");
+                }
+                self.sync_field_text();
                 let (width, height) = self.quake.target_size(output);
                 self.surface_width = width;
                 self.surface_height = height;
-                // Keep the fixed-height layout until the surface has really shrunk,
-                // otherwise the terminal would stretch over the tall surface for a frame.
-                self.display_height = Some(height as f32);
+                // Keep the fixed-size layout until the surface has really shrunk,
+                // otherwise the terminal would stretch over the large surface for a frame.
+                self.display_size = Some((width.map_or(output.0, |w| w as f32), height as f32));
                 self.shrink_pending = true;
+                // The blur keeps its dragged rectangle until the surface has really shrunk
+                // (see the `shrink_pending` arm of `SurfaceSize`), otherwise it would sit
+                // at the wrong place for a frame.
                 return Task::batch([
-                    self.blur_task(id, height as f32),
+                    set_anchor(id, Self::anchor_for(width)),
                     set_size(id, width, Some(height)),
                 ]);
             }
-            Message::HandleHover(hover) => self.handle_hover = hover,
+            Message::HandleHover(edge) => self.handle_hover = edge,
+            Message::ReorderTab(event) => {
+                let _ = self
+                    .tab_model
+                    .reorder(event.dragged, event.target, event.position);
+                // Keep the tab list in the order the tab bar shows.
+                let model = &self.tab_model;
+                self.tabs
+                    .sort_by_key(|tab| model.position(tab.entity).unwrap_or(u16::MAX));
+            }
             Message::SettingsOpen => {
                 self.close_context_menu();
                 self.draft = self.quake.clone();
@@ -1781,44 +1958,10 @@ impl Application for Quake {
                     self.show()
                 };
             }
-            Message::Zoom(delta) => {
-                if let Some(terminal) = self.focused_terminal() {
-                    let mut terminal = terminal.lock().unwrap();
-                    let zoom = terminal.zoom_adj().saturating_add(delta);
-                    terminal.set_zoom_adj(zoom);
-                    terminal.set_config(&self.config, &self.themes);
-                }
-            }
-            Message::ZoomPane(pane, delta) => {
-                let terminal = self
-                    .active_tab()
-                    .and_then(|tab| tab.panes.get(pane))
-                    .map(|pane| &pane.terminal);
-                if let Some(terminal) = terminal {
-                    let mut terminal = terminal.lock().unwrap();
-                    let zoom = terminal.zoom_adj().saturating_add(delta);
-                    terminal.set_zoom_adj(zoom);
-                    terminal.set_config(&self.config, &self.themes);
-                }
-            }
-            Message::ZoomResetPane(pane) => {
-                let terminal = self
-                    .active_tab()
-                    .and_then(|tab| tab.panes.get(pane))
-                    .map(|pane| &pane.terminal);
-                if let Some(terminal) = terminal {
-                    let mut terminal = terminal.lock().unwrap();
-                    terminal.set_zoom_adj(0);
-                    terminal.set_config(&self.config, &self.themes);
-                }
-            }
-            Message::ZoomReset => {
-                if let Some(terminal) = self.focused_terminal() {
-                    let mut terminal = terminal.lock().unwrap();
-                    terminal.set_zoom_adj(0);
-                    terminal.set_config(&self.config, &self.themes);
-                }
-            }
+            // Zoom is one global value: it applies to every terminal and is remembered
+            // for the next start.
+            Message::Zoom(delta) => self.apply_zoom(i32::from(self.quake.zoom) + i32::from(delta)),
+            Message::ZoomReset => self.apply_zoom(0),
         }
         Task::none()
     }
@@ -1855,8 +1998,8 @@ impl Application for Quake {
             let mut terminal_box = terminal_box(&data.terminal, &self.key_binds)
                 .id(data.widget_id.clone())
                 .on_context_menu(move |menu_state| Message::ContextMenu(pane, menu_state))
-                .on_zoom(move |delta| Message::ZoomPane(pane, delta))
-                .on_middle_double_click(move || Message::ZoomResetPane(pane))
+                .on_zoom(Message::Zoom)
+                .on_middle_double_click(|| Message::ZoomReset)
                 .opacity(self.effective_opacity())
                 .padding(space_xxs)
                 .sharp_corners(true)
@@ -1977,7 +2120,7 @@ impl Application for Quake {
                 // mouse movement does not wake the app.
                 event::listen_with(|event, _status, _id| match event {
                     Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                        Some(Message::ResizeMove(position.y))
+                        Some(Message::ResizeMove(position))
                     }
                     Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                         Some(Message::ResizeEnd)

@@ -11,6 +11,9 @@ pub const VERSION: u64 = 1;
 pub const DEFAULT_ANIMATION_MS: u16 = 300;
 pub const MIN_ANIMATION_MS: u16 = 50;
 pub const MAX_ANIMATION_MS: u16 = 2000;
+/// Range of the persisted zoom (steps relative to the configured font size).
+pub const MIN_ZOOM: i8 = -8;
+pub const MAX_ZOOM: i8 = 30;
 pub const MIN_PERCENT: u16 = 10;
 pub const MAX_PERCENT: u16 = 100;
 
@@ -27,6 +30,8 @@ pub struct QuakeConfig {
     pub monitor: String,
     /// New tabs and splits start in the working directory of the focused terminal.
     pub inherit_cwd: bool,
+    /// Font zoom in steps relative to the font size from cosmic-term's settings.
+    pub zoom: i8,
 }
 
 impl Default for QuakeConfig {
@@ -37,6 +42,7 @@ impl Default for QuakeConfig {
             animation_ms: DEFAULT_ANIMATION_MS,
             monitor: String::new(),
             inherit_cwd: true,
+            zoom: 0,
         }
     }
 }

@@ -15,11 +15,12 @@ and panel use.
 
 - Drops down from the top edge below the panel and takes keyboard focus immediately;
   panel applet popups stay visible above it
-- Size in percent of the screen (default 40 % high, 100 % wide); drag the bottom edge
-  with the mouse to resize, the new height is remembered
+- Size in percent of the screen (default 40 % high, 100 % wide); drag the bottom edge to
+  change the height and the left or right edge to change the width (the terminal stays
+  centered), the new size is remembered
 - Tabs and splits: several tabs (a tab bar appears from the second tab on), each tab can
   be split horizontally and vertically into any number of terminals; drag the dividers to
-  resize, drag a pane to rearrange; new tabs and splits start in the working directory of
+  resize, drag a pane to rearrange, drag a tab to reorder; new tabs and splits start in the working directory of
   the focused terminal (can be switched off, then they start in `$HOME`)
 - Monitor choice: the active monitor (default) or a fixed one, set in the settings or with
   `--monitor`; if the chosen monitor is not connected the active one is used
@@ -33,7 +34,8 @@ and panel use.
   change them in cosmic-term and the drop-down terminal follows
 - Copy/paste (`Ctrl+Shift+C` / `Ctrl+Shift+V`), select all (`Ctrl+Shift+A`), zoom
   (`Ctrl+=`, `Ctrl+-`, `Ctrl+0` or `Ctrl` + mouse wheel; a double click with the middle
-  mouse button also resets the font size)
+  mouse button also resets the font size); the zoom applies to all terminals and is
+  remembered for the next start
 - Right-click menu: copy, paste, select all, open/copy link, split, new tab, close
 - Controlled over D-Bus, so any COSMIC custom shortcut can drive it
 - Shell exits (`exit`) → hides and starts a fresh shell for the next toggle
@@ -120,16 +122,15 @@ and a fresh shell is ready for the next toggle.
 
 ## Limitations / TODO
 
-- Width can only be changed with the settings or `--width`, not with the mouse
 - The surface sits on the `top` layer (like the panel) so applet popups can appear above
   it; fullscreen windows therefore cover the terminal
-- While dragging the bottom edge, a transparent screen-height area covers the windows
-  behind it (clicks beside the terminal go to the terminal's surface until you release)
+- While dragging an edge, a transparent screen-sized area covers the windows behind it
+  (clicks beside the terminal go to the terminal's surface until you release)
 - Shortcuts on non-Latin keyboard layouts (e.g. Cyrillic) fall back to the logical key
   only
 - The directory is taken from the shell process (`/proc/<pid>/cwd`), not from the program
   running in the foreground, and only works on Linux
-- Tabs cannot be reordered by dragging
+- Tab dragging relies on drag and drop inside a layer-shell surface
 - "Active monitor" means the output the compositor considers active; whether that follows the
   mouse pointer or the keyboard focus is decided by COSMIC
 
