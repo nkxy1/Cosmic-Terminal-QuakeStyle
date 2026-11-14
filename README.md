@@ -13,7 +13,12 @@ and panel use.
 
 ## Features
 
-- Overlay anchored to the top edge, full width, takes keyboard focus immediately
+- Overlay anchored to the top edge, takes keyboard focus immediately
+- Size in percent of the screen (default 40 % high, 100 % wide), changeable with
+  `--height`/`--width`; drag the bottom edge with the mouse to resize, the new height
+  is remembered
+- Follows the system appearance: accent color, dark/light, and the translucent
+  "frosted" look (transparency level and blur) chosen in COSMIC Settings
 - Reuses your **cosmic-term settings** (font, color scheme, opacity) —
   change them in cosmic-term and the drop-down terminal follows
 - Copy/paste (`Ctrl+Shift+C` / `Ctrl+Shift+V`), select all (`Ctrl+Shift+A`), zoom
@@ -59,7 +64,12 @@ cosmic-quake-term --show       show the terminal
 cosmic-quake-term --hide       hide the terminal
 cosmic-quake-term --quit       stop the running daemon
 cosmic-quake-term --daemon     start hidden in the background (for autostart)
+cosmic-quake-term --height N   height in percent of the screen, 10-100
+cosmic-quake-term --width N    width in percent of the screen, 10-100 (centered)
 ```
+
+`--height` and `--width` can be combined and are applied live by a running daemon.
+They are stored in `~/.config/cosmic/dev.norman.CosmicQuakeTerm/v1/`.
 
 The D-Bus API is `dev.norman.CosmicQuakeTerm` on the session bus, object
 `/dev/norman/CosmicQuakeTerm`, methods `Toggle`, `Show`, `Hide`, `Quit`:
@@ -71,8 +81,12 @@ busctl --user call dev.norman.CosmicQuakeTerm /dev/norman/CosmicQuakeTerm \
 
 ## Limitations / TODO
 
-- Height is fixed at 400 px, width is the full screen; no setting yet
+- Width can only be changed with `--width`, not with the mouse
 - No slide animation
+- While dragging the bottom edge, a transparent screen-height area covers the windows
+  behind it (clicks beside the terminal go to the terminal's surface until you release)
+- Shortcuts on non-Latin keyboard layouts (e.g. Cyrillic) fall back to the logical key
+  only
 - Single terminal: no tabs or splits
 - The context menu is English only
 - Shows on the active output only
@@ -83,8 +97,12 @@ busctl --user call dev.norman.CosmicQuakeTerm /dev/norman/CosmicQuakeTerm \
 `terminal.rs`, `terminal_box.rs`, `mouse_reporter.rs`, `terminal_theme.rs`, `config.rs`,
 and the context menu in `menu.rs` — is derived from
 [cosmic-term](https://github.com/pop-os/cosmic-term) with tabs, panes and settings UI
-removed. `Cargo.lock` is taken from cosmic-term so libcosmic and cosmic-text stay on
-matching revisions; keep them in sync when updating.
+removed.
+
+libcosmic is pinned to a revision in `Cargo.toml`. It must read the same theme config
+version as your COSMIC release (COSMIC 1.10 stores it under `…/v2`); an older libcosmic
+silently falls back to the default theme, which shows up as wrong accent and transparency.
+The copied terminal code uses libcosmic's API, so bump the revision and the code together.
 
 ## License
 

@@ -717,7 +717,7 @@ where
             let scrollbar_color: Color = if pressed {
                 // pressed_state_color, 0.5
                 cosmic_theme
-                    .background
+                    .background(false)
                     .component
                     .pressed
                     .without_alpha()
@@ -727,7 +727,7 @@ where
             } else if hover {
                 // hover_state_color, 0.2
                 cosmic_theme
-                    .background
+                    .background(false)
                     .component
                     .hover
                     .without_alpha()
@@ -899,7 +899,7 @@ where
                 ..
             }) if state.is_focused && named == modified_named => {
                 for key_bind in self.key_binds.keys() {
-                    if key_bind.matches(*modifiers, &Key::Named(*named)) {
+                    if key_bind.matches(*modifiers, &Key::Named(*named), None) {
                         shell.capture_event();
                         return;
                     }
@@ -1087,7 +1087,7 @@ where
                 ..
             }) if state.is_focused => {
                 for key_bind in self.key_binds.keys() {
-                    if key_bind.matches(*modifiers, key) {
+                    if key_bind.matches(*modifiers, key, None) {
                         shell.capture_event();
 
                         return;

@@ -40,10 +40,11 @@ pub fn context_menu<'a>(
     };
 
     fn key_style(theme: &cosmic::Theme) -> TextStyle {
-        let mut color = theme.cosmic().background.component.on;
+        let mut color = theme.cosmic().background(false).component.on;
         color.alpha *= 0.75;
         TextStyle {
             color: Some(color.into()),
+            ..Default::default()
         }
     }
 
@@ -95,7 +96,7 @@ pub fn context_menu<'a>(
         .padding(1)
         .style(|theme| {
             let cosmic = theme.cosmic();
-            let component = &cosmic.background.component;
+            let component = &cosmic.background(false).component;
             widget::container::Style {
                 icon_color: Some(component.on.into()),
                 text_color: Some(component.on.into()),

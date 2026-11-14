@@ -9,6 +9,7 @@ mod config;
 mod dbus;
 mod menu;
 mod mouse_reporter;
+mod settings;
 mod terminal;
 mod terminal_box;
 mod terminal_theme;
@@ -25,7 +26,7 @@ use cosmic::{
     app::{Core, Settings, Task},
     cosmic_config::{self, CosmicConfigEntry},
     iced::{
-        self, Color, Event, Length, Subscription, clipboard,
+        self, Color, Event, Length, Point, Rectangle, Size, Subscription, clipboard, mouse,
         event,
         futures::SinkExt,
         keyboard::{Event as KeyEvent, Key, Modifiers, key::Named},
@@ -33,9 +34,10 @@ use cosmic::{
     },
     iced::platform_specific::{
         runtime::wayland::layer_surface::{IcedOutput, SctkLayerSurfaceSettings},
+        shell::commands::blur::blur,
         shell::commands::layer_surface::{
             Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface,
-            set_keyboard_interactivity,
+            set_anchor, set_keyboard_interactivity, set_size,
         },
     },
     widget::{self, menu::key_bind::{KeyBind, Modifier}},
@@ -44,6 +46,7 @@ use tokio::sync::mpsc;
 
 use config::{COSMIC_THEME_DARK, COSMIC_THEME_LIGHT, ColorSchemeKind, Config};
 use menu::{MenuState, context_menu};
+use settings::QuakeConfig;
 use terminal::Terminal;
 use terminal_box::terminal_box;
 
@@ -95,6 +98,9 @@ USAGE:
     cosmic-quake-term --hide       hide the terminal
     cosmic-quake-term --quit       stop the running daemon
     cosmic-quake-term --daemon     start hidden in the background (for autostart)
+    cosmic-quake-term --height N   set the height in percent of the screen (10-100)
+    cosmic-quake-term --width N    set the width in percent of the screen (10-100)
+                                   (both can be combined; a running daemon applies them live)
     cosmic-quake-term --help       show this help
 ";
 
@@ -132,6 +138,40 @@ fn main() -> iced::Result {
             }
             true
         }
+        Some(flag @ ("--height" | "--width")) => {
+            let mut height = None;
+            let mut width = None;
+            let mut next = Some(flag.to_string());
+            while let Some(flag) = next.take() {
+                let value = args.next().and_then(|v| v.parse::<u16>().ok());
+                let Some(value) = value else {
+                    eprintln!("{flag} needs a whole number (percent)\n\n{USAGE}");
+                    std::process::exit(2);
+                };
+                match flag.as_str() {
+                    "--height" => height = Some(value),
+                    "--width" => width = Some(value),
+                    _ => {
+                        eprintln!("unexpected argument {flag:?}\n\n{USAGE}");
+                        std::process::exit(2);
+                    }
+                }
+                next = args.next();
+            }
+            match settings::save(height, width) {
+                Ok(config) => {
+                    println!(
+                        "height {}%, width {}%",
+                        config.height_percent, config.width_percent
+                    );
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("failed to save settings: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             std::process::exit(0);
@@ -165,6 +205,8 @@ fn main() -> iced::Result {
         std::env::set_var("TERM", "xterm-256color");
     }
 
+    let (quake_handler, quake) = settings::load();
+
     let settings = Settings::default()
         .theme(config.app_theme.theme())
         .no_main_window(true);
@@ -173,6 +215,8 @@ fn main() -> iced::Result {
         Flags {
             config_handler,
             config,
+            quake,
+            quake_handler,
             start_visible,
         },
     )
@@ -193,6 +237,8 @@ fn exit_after_send(command: dbus::Command) -> ! {
 struct Flags {
     config_handler: Option<cosmic_config::Config>,
     config: Config,
+    quake: QuakeConfig,
+    quake_handler: Option<cosmic_config::Config>,
     start_visible: bool,
 }
 
@@ -202,6 +248,11 @@ enum Message {
     ContextMenu(Option<MenuState>),
     CopyLink,
     Dbus(dbus::Command),
+    QuakeConfig(Box<QuakeConfig>),
+    ResizeStart,
+    ResizeMove(f32),
+    ResizeEnd,
+    HandleHover(bool),
     MenuAction(Action),
     OpenLink,
     Key(Modifiers, Key),
@@ -213,6 +264,8 @@ enum Message {
     ZoomReset,
     /// Sent shortly after the surface is mapped: relax exclusive keyboard grab.
     Settle(window::Id),
+    /// First configure or a resize of a layer surface, in logical pixels.
+    SurfaceSize(window::Id, cosmic::iced::Size),
 }
 
 struct Quake {
@@ -228,6 +281,26 @@ struct Quake {
     terminal_id: widget::Id,
     surface: Option<window::Id>,
     context_menu: Option<MenuState>,
+    quake: QuakeConfig,
+    /// True between creating the surface and learning the output size.
+    measuring: bool,
+    quake_handler: Option<cosmic_config::Config>,
+    /// Logical size of the output the surface was measured on.
+    output_size: Option<(f32, f32)>,
+    /// Current logical size of the surface (width `None` = full width).
+    surface_width: Option<u32>,
+    surface_height: u32,
+    /// True while the user drags the bottom edge.
+    resizing: bool,
+    /// While dragging (and until the final shrink is acknowledged) the content is laid
+    /// out at this height inside a surface that may be taller. The Wayland surface is
+    /// resized only twice per drag (grow at the start, shrink at the end) instead of on
+    /// every pointer event, which is what made the window flicker.
+    display_height: Option<f32>,
+    /// The final shrink was requested and its configure has not arrived yet.
+    shrink_pending: bool,
+    /// Pointer is over the grab strip.
+    handle_hover: bool,
 }
 
 impl Quake {
@@ -240,7 +313,7 @@ impl Quake {
             }
         }
 
-        let color = Color::from(self.config.app_theme.theme().cosmic().background.base);
+        let color = Color::from(self.config.app_theme.theme().cosmic().background(false).base);
         let b = color.into_rgba8();
         let data =
             u32::from(b[2]) | (u32::from(b[1]) << 8) | (u32::from(b[0]) << 16) | 0xFF000000;
@@ -289,17 +362,27 @@ impl Quake {
         }
         let id = window::Id::unique();
         self.surface = Some(id);
+        self.measuring = true;
         Task::batch([
+            // Layer-shell only knows pixels. To turn percentages into pixels we first
+            // map an invisible surface anchored to all edges: the compositor sizes it
+            // to the active output, and `Message::SurfaceSize` then shrinks it to the
+            // configured size. It only exists for a moment and draws nothing.
             get_layer_surface(SctkLayerSurfaceSettings {
                 id,
                 layer: Layer::Overlay,
                 // Exclusive so the compositor focuses us right away; relaxed to
                 // OnDemand in `Message::Settle` so other windows stay clickable.
                 keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+                anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
                 output: IcedOutput::Active,
                 namespace: "cosmic-quake-term".into(),
-                size: Some((None, Some(400))),
+                size: Some((None, None)),
+                size_limits: cosmic::iced::core::layout::Limits::NONE
+                    .min_width(1.0)
+                    .min_height(1.0)
+                    .max_width(16384.0)
+                    .max_height(16384.0),
                 ..Default::default()
             }),
             widget::text_input::focus(self.terminal_id.clone()),
@@ -314,9 +397,98 @@ impl Quake {
     }
 
     fn hide(&mut self) -> Task<Message> {
+        self.measuring = false;
+        self.resizing = false;
+        self.display_height = None;
+        self.shrink_pending = false;
+        self.handle_hover = false;
         match self.surface.take() {
             Some(id) => destroy_layer_surface(id),
             None => Task::none(),
+        }
+    }
+
+    /// Does the system theme ask for frosted (translucent + blurred) system surfaces?
+    fn frosted(&self) -> bool {
+        cosmic::theme::active().cosmic().frosted_system_interface
+    }
+
+    /// Background alpha chosen in COSMIC Settings (1.0 when transparency is off).
+    fn system_alpha(&self) -> f32 {
+        if self.frosted() {
+            cosmic::theme::active().cosmic().background(true).base.alpha
+        } else {
+            1.0
+        }
+    }
+
+    /// cosmic-term's own opacity setting combined with the system transparency.
+    fn effective_opacity(&self) -> f32 {
+        self.config.opacity_ratio() * self.system_alpha()
+    }
+
+    /// Blur only the area the terminal actually covers.
+    fn blur_task(&self, id: window::Id, height: f32) -> Task<Message> {
+        if !self.frosted() {
+            return Task::none();
+        }
+        let width = self
+            .surface_width
+            .map(|w| w as f32)
+            .or(self.output_size.map(|(w, _)| w))
+            .unwrap_or(0.0);
+        blur(
+            id,
+            Some(vec![Rectangle::new(Point::ORIGIN, Size::new(width, height))]),
+        )
+        .map(|()| cosmic::Action::None)
+    }
+
+    /// Put a thin grab strip under the terminal; dragging it resizes the surface.
+    fn with_resize_handle<'a>(&self, content: Element<'a, Message>) -> Element<'a, Message> {
+        const HANDLE_HEIGHT: f32 = 6.0;
+        // At rest the strip is painted like the terminal so it is not noticeable; it
+        // only lights up while the pointer is on it or a drag is in progress.
+        let highlighted = self.handle_hover || self.resizing;
+        let idle = self
+            .terminal
+            .as_ref()
+            .map(|terminal| {
+                let terminal = terminal.lock().unwrap();
+                let bg = terminal.metadata_set[terminal.default_attrs().metadata].bg;
+                Color::from_rgba8(bg.r(), bg.g(), bg.b(), self.effective_opacity())
+            })
+            .unwrap_or(Color::TRANSPARENT);
+        let strip = widget::container(widget::space::vertical())
+            .width(Length::Fill)
+            .height(Length::Fixed(HANDLE_HEIGHT))
+            .class(cosmic::theme::Container::custom(move |theme| {
+                let color = if highlighted {
+                    Color::from(theme.cosmic().accent_color())
+                } else {
+                    idle
+                };
+                widget::container::Style {
+                    background: Some(color.into()),
+                    ..Default::default()
+                }
+            }));
+        let handle = widget::mouse_area(strip)
+            .on_enter(Message::HandleHover(true))
+            .on_exit(Message::HandleHover(false))
+            .on_press(Message::ResizeStart)
+            .interaction(mouse::Interaction::ResizingVertically);
+        let column = widget::column::with_children(vec![content, handle.into()])
+            .width(Length::Fill)
+            .height(Length::Fill);
+        match self.display_height {
+            // Surface is taller than the terminal: draw only the top part, the rest
+            // of the surface stays transparent.
+            Some(height) => widget::container(column)
+                .width(Length::Fill)
+                .height(Length::Fixed(height))
+                .into(),
+            None => column.into(),
         }
     }
 
@@ -362,6 +534,7 @@ static TERM_EVENT_RX: Mutex<Option<mpsc::UnboundedReceiver<TermEvent>>> = Mutex:
 struct TerminalEventSubscription;
 struct ConfigSubscription;
 struct DbusSubscription;
+struct QuakeConfigSubscription;
 
 impl Application for Quake {
     type Executor = cosmic::executor::Default;
@@ -377,7 +550,11 @@ impl Application for Quake {
         &mut self.core
     }
 
-    fn init(core: Core, flags: Flags) -> (Self, Task<Message>) {
+    fn init(mut core: Core, flags: Flags) -> (Self, Task<Message>) {
+        // libcosmic would blur the *whole* layer surface, including the invisible
+        // measuring surface and the transparent area below the terminal while
+        // dragging. We request blur ourselves, limited to the terminal rectangle.
+        core.set_auto_blur(Default::default());
         let mut app = Quake {
             core,
             config_handler: flags.config_handler,
@@ -390,6 +567,16 @@ impl Application for Quake {
             terminal_id: widget::Id::unique(),
             surface: None,
             context_menu: None,
+            quake: flags.quake,
+            measuring: false,
+            quake_handler: flags.quake_handler,
+            output_size: None,
+            surface_width: None,
+            surface_height: 0,
+            resizing: false,
+            display_height: None,
+            shrink_pending: false,
+            handle_hover: false,
         };
         app.update_theme_state();
         // Start the shell right away so the very first frame already shows the terminal.
@@ -453,7 +640,7 @@ impl Application for Quake {
                     let action = self
                         .key_binds
                         .iter()
-                        .find(|(bind, _)| bind.matches(modifiers, &key))
+                        .find(|(bind, _)| bind.matches(modifiers, &key, None))
                         .map(|(_, action)| *action);
                     if let Some(action) = action {
                         return self.run_action(action);
@@ -528,6 +715,109 @@ impl Application for Quake {
                     dbus::Command::Quit => cosmic::iced::exit(),
                 };
             }
+            Message::QuakeConfig(config) => {
+                if self.quake != *config {
+                    self.quake = *config;
+                    // Re-map the surface so the new size takes effect immediately.
+                    if self.surface.is_some() {
+                        let hide = self.hide();
+                        let show = self.show();
+                        return Task::batch([hide, show]);
+                    }
+                }
+            }
+            Message::SurfaceSize(id, size)
+                if self.shrink_pending && !self.resizing && self.surface == Some(id) =>
+            {
+                // Ignore configures that are still about the earlier grow.
+                if (size.height - self.surface_height as f32).abs() < 1.5 {
+                    self.shrink_pending = false;
+                    self.display_height = None;
+                }
+            }
+            Message::SurfaceSize(id, size) => {
+                if self.measuring && self.surface == Some(id) {
+                    self.measuring = false;
+                    self.output_size = Some((size.width, size.height));
+                    let (width, height) = self.quake.target_size((size.width, size.height));
+                    self.surface_width = width;
+                    self.surface_height = height;
+                    // Anchored to the top edge only the surface is centered horizontally;
+                    // with full width it also spans left to right.
+                    let anchor = if width.is_some() {
+                        Anchor::TOP
+                    } else {
+                        Anchor::TOP | Anchor::LEFT | Anchor::RIGHT
+                    };
+                    return Task::batch([
+                        set_anchor(id, anchor),
+                        set_size(id, width, Some(height)),
+                        self.blur_task(id, height as f32),
+                        widget::text_input::focus(self.terminal_id.clone()),
+                    ]);
+                }
+            }
+            Message::ResizeStart => {
+                if let (Some(id), false, Some((_, output_h))) =
+                    (self.surface, self.measuring, self.output_size)
+                {
+                    self.resizing = true;
+                    self.shrink_pending = false;
+                    // Keep showing the content at its current height, then grow the
+                    // surface to the full output height once.
+                    self.display_height = Some(self.surface_height as f32);
+                    return set_size(id, self.surface_width, Some(output_h.ceil() as u32));
+                }
+            }
+            Message::ResizeMove(y) => {
+                // The surface is anchored to the top, so the pointer's y coordinate
+                // inside it is exactly the height the user is asking for. Only the
+                // layout changes here; no Wayland request is sent.
+                if let (true, Some((_, output_h))) = (self.resizing, self.output_size) {
+                    let min = output_h * f32::from(settings::MIN_PERCENT) / 100.0;
+                    let height = y.clamp(min, output_h).round();
+                    let changed = self.surface_height != height as u32;
+                    self.surface_height = height as u32;
+                    self.display_height = Some(height);
+                    if let (true, Some(id)) = (changed, self.surface) {
+                        return self.blur_task(id, height);
+                    }
+                }
+            }
+            Message::ResizeEnd => {
+                if !self.resizing {
+                    return Task::none();
+                }
+                self.resizing = false;
+                let (Some(id), Some(output)) = (self.surface, self.output_size) else {
+                    return Task::none();
+                };
+                let percent = settings::clamp_percent(
+                    (self.surface_height as f32 / output.1 * 100.0).round() as u16,
+                );
+                // Save, then snap to the stored percentage so what you see is what a
+                // fresh start will give. `self.quake` is updated first so the config
+                // watcher's echo is recognised as "no change" and does not re-map us.
+                self.quake.height_percent = percent;
+                if let Some(handler) = &self.quake_handler {
+                    let mut stored = self.quake.clone();
+                    if let Err(err) = stored.set_height_percent(handler, percent) {
+                        log::warn!("failed to save height: {err}");
+                    }
+                }
+                let (width, height) = self.quake.target_size(output);
+                self.surface_width = width;
+                self.surface_height = height;
+                // Keep the fixed-height layout until the surface has really shrunk,
+                // otherwise the terminal would stretch over the tall surface for a frame.
+                self.display_height = Some(height as f32);
+                self.shrink_pending = true;
+                return Task::batch([
+                    self.blur_task(id, height as f32),
+                    set_size(id, width, Some(height)),
+                ]);
+            }
+            Message::HandleHover(hover) => self.handle_hover = hover,
             Message::Settle(id) => {
                 if self.surface == Some(id) {
                     return Task::batch([
@@ -567,6 +857,9 @@ impl Application for Quake {
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
+        if self.measuring {
+            return widget::space::vertical().into();
+        }
         let Some(terminal) = &self.terminal else {
             // Same colour the terminal uses, so there is no flash while it is missing.
             let bg = terminal::WINDOW_BG_COLOR.load(Ordering::SeqCst);
@@ -586,13 +879,13 @@ impl Application for Quake {
         let mut terminal_box = terminal_box(terminal, &self.key_binds)
             .id(self.terminal_id.clone())
             .on_context_menu(Message::ContextMenu)
-            .opacity(self.config.opacity_ratio())
+            .opacity(self.effective_opacity())
             .padding(space_xxs)
             .sharp_corners(true)
             .show_headerbar(false);
 
         let Some(menu_state) = &self.context_menu else {
-            return terminal_box.into();
+            return self.with_resize_handle(terminal_box.into());
         };
         let point = menu_state
             .local_position
@@ -607,14 +900,14 @@ impl Application for Quake {
             .lock()
             .selection_to_string()
             .is_some();
-        widget::popover(terminal_box)
+        let popover = widget::popover(terminal_box)
             .popup(context_menu(
                 &self.key_binds,
                 has_selection,
                 menu_state.link.clone(),
             ))
-            .position(widget::popover::Position::Point(point))
-            .into()
+            .position(widget::popover::Position::Point(point));
+        self.with_resize_handle(popover.into())
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -622,10 +915,13 @@ impl Application for Quake {
             // The status is deliberately ignored: terminal_box captures key presses
             // that match a key bind so they are not sent to the shell, and we still
             // need to see exactly those here.
-            event::listen_with(|event, _status, _| match event {
+            event::listen_with(|event, _status, id| match event {
                 Event::Keyboard(KeyEvent::KeyPressed { key, modifiers, .. }) => {
                     Some(Message::Key(modifiers, key))
                 }
+                Event::Window(
+                    window::Event::Opened { size, .. } | window::Event::Resized(size),
+                ) => Some(Message::SurfaceSize(id, size)),
                 _ => None,
             }),
             Subscription::run_with(TypeId::of::<TerminalEventSubscription>(), |_| {
@@ -667,6 +963,27 @@ impl Application for Quake {
                     },
                 )
             }),
+            if self.resizing {
+                // Only listen to pointer motion while a drag is in progress, so idle
+                // mouse movement does not wake the app.
+                event::listen_with(|event, _status, _id| match event {
+                    Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                        Some(Message::ResizeMove(position.y))
+                    }
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                        Some(Message::ResizeEnd)
+                    }
+                    _ => None,
+                })
+            } else {
+                Subscription::none()
+            },
+            cosmic_config::config_subscription(
+                TypeId::of::<QuakeConfigSubscription>(),
+                settings::ID.into(),
+                settings::VERSION,
+            )
+            .map(|update| Message::QuakeConfig(Box::new(update.config))),
             cosmic_config::config_subscription(
                 TypeId::of::<ConfigSubscription>(),
                 TERM_CONFIG_ID.into(),
