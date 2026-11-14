@@ -1,4 +1,4 @@
-# cosmic-quake-term
+# Cosmic-Terminal-QuakeStyle
 
 A Quake-style drop-down terminal for the [COSMIC](https://system76.com/cosmic) desktop.
 
@@ -6,7 +6,7 @@ Press a key and a terminal slides in at the top of your screen; press it again a
 disappears. The shell keeps running while hidden, so your session is still there when
 you bring it back.
 
-It is a small standalone program (not a cosmic-term plugin — cosmic-term has no plugin
+The program is called `cosmic-quake-term`. It is a small standalone program (not a cosmic-term plugin — cosmic-term has no plugin
 system). On Wayland a normal window cannot pin itself to a screen edge, so the terminal
 is drawn on a `wlr-layer-shell` overlay surface, the same mechanism the COSMIC launcher
 and panel use.
@@ -43,6 +43,31 @@ and panel use.
   `LC_MESSAGES`, `LANG`), other locales fall back to English
 
 ## Install
+
+### From a package
+
+Download the package for your system from the
+[latest release](https://github.com/nkxy1/Cosmic-Terminal-QuakeStyle/releases/latest)
+(`SHA256SUMS` is attached for verification) and install it:
+
+```sh
+# Debian, Ubuntu, Pop!_OS (amd64)
+sudo apt install ./cosmic-quake-term_*_amd64.deb
+
+# Fedora (x86_64)
+sudo dnf install ./cosmic-quake-term-*.x86_64.rpm
+```
+
+The packages install the program, a launcher entry and an autostart entry
+(`/etc/xdg/autostart`) that starts the background daemon at login; remove or override it
+in COSMIC's startup applications if you do not want that. The first `--toggle` starts the
+daemon anyway, so the autostart entry only makes the first use instant.
+
+The packages are built against a COSMIC release that stores its theme config in version 2
+(COSMIC 1.10, Fedora 45). On an older COSMIC release the terminal still works but falls
+back to the default colors. Only x86_64/amd64 packages are built.
+
+### From source
 
 Requires Rust 1.90+ and the usual libcosmic build dependencies. On Fedora:
 
@@ -150,6 +175,21 @@ libcosmic is pinned to a revision in `Cargo.toml`. It must read the same theme c
 version as your COSMIC release (COSMIC 1.10 stores it under `…/v2`); an older libcosmic
 silently falls back to the default theme, which shows up as wrong accent and transparency.
 The copied terminal code uses libcosmic's API, so bump the revision and the code together.
+
+## Releases
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`). To publish one,
+set the new version in `Cargo.toml`, commit it and push a matching tag:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The workflow builds the `.deb` (Ubuntu 24.04) and the `.rpm` (Fedora), attaches both with a
+`SHA256SUMS` file to a new GitHub release and generates the release notes. The workflow
+refuses a tag that does not match the version in `Cargo.toml`. `CI` (`ci.yml`) checks the
+formatting, clippy and the build on every push.
 
 ## License
 
