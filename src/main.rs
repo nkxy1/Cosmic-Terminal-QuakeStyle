@@ -141,6 +141,7 @@ fn usage() -> String {
         ("--width N", fl!("cli-width")),
         ("--animation on|off|MS", fl!("cli-animation")),
         ("--monitor NAME|active", fl!("cli-monitor")),
+        ("--inherit-cwd on|off", fl!("cli-inherit-cwd")),
         ("--list-monitors", fl!("cli-list-monitors")),
         ("--new-tab", fl!("cli-new-tab")),
         ("--split-horizontal", fl!("cli-split-horizontal")),
@@ -214,7 +215,7 @@ fn main() -> iced::Result {
             }
             std::process::exit(0);
         }
-        Some(flag @ ("--height" | "--width" | "--animation" | "--monitor")) => {
+        Some(flag @ ("--height" | "--width" | "--animation" | "--monitor" | "--inherit-cwd")) => {
             let mut update = settings::Update::default();
             let mut next = Some(flag.to_string());
             while let Some(flag) = next.take() {
@@ -223,6 +224,7 @@ fn main() -> iced::Result {
                     let message = match kind {
                         1 => fl!("cli-needs-animation", flag = flag.clone()),
                         2 => fl!("cli-needs-monitor", flag = flag.clone()),
+                        3 => fl!("cli-needs-switch", flag = flag.clone()),
                         _ => fl!("cli-needs-percent", flag = flag.clone()),
                     };
                     eprintln!("{message}\n\n{}", usage());
@@ -244,6 +246,13 @@ fn main() -> iced::Result {
                             value
                                 .and_then(|v| settings::parse_animation(&v))
                                 .unwrap_or_else(|| bad(1)),
+                        )
+                    }
+                    "--inherit-cwd" => {
+                        update.inherit_cwd = Some(
+                            value
+                                .and_then(|v| settings::parse_switch(&v))
+                                .unwrap_or_else(|| bad(3)),
                         )
                     }
                     "--monitor" => {
@@ -384,6 +393,7 @@ enum Message {
     /// A slider moved (not applied until released).
     Draft(Field, f32),
     AnimationToggle(bool),
+    InheritToggle(bool),
     /// Index into `monitor_choices`.
     MonitorSelected(usize),
     Output(OutputEvent, WlOutput),
@@ -617,7 +627,7 @@ impl Quake {
     }
 
     /// Start a shell in a new terminal. `None` if it could not be created.
-    fn create_pane(&mut self) -> Option<TermPane> {
+    fn create_pane(&mut self, cwd: Option<std::path::PathBuf>) -> Option<TermPane> {
         let Some(colors) = self.colors() else {
             log::error!("no terminal color scheme available");
             return None;
@@ -628,7 +638,16 @@ impl Quake {
             id,
             self.term_tx.clone(),
             self.term_config.clone(),
-            tty::Options::default(),
+            tty::Options {
+                // Without an inherited directory start in $HOME, not wherever the daemon
+                // happened to be launched from.
+                working_directory: cwd.or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(std::path::PathBuf::from)
+                        .filter(|home| home.is_dir())
+                }),
+                ..tty::Options::default()
+            },
             &self.config,
             colors,
             None,
@@ -649,8 +668,17 @@ impl Quake {
         }
     }
 
-    fn new_tab(&mut self) -> Task<Message> {
-        let Some(pane) = self.create_pane() else {
+    /// Directory a new tab or split should start in: the focused terminal's current
+    /// directory, unless the setting is off.
+    fn inherited_cwd(&self) -> Option<std::path::PathBuf> {
+        if !self.quake.inherit_cwd {
+            return None;
+        }
+        self.focused_terminal()?.lock().ok()?.working_directory()
+    }
+
+    fn new_tab(&mut self, cwd: Option<std::path::PathBuf>) -> Task<Message> {
+        let Some(pane) = self.create_pane(cwd) else {
             return Task::none();
         };
         if let Some(tab) = self.active_tab() {
@@ -670,7 +698,8 @@ impl Quake {
     }
 
     fn split(&mut self, axis: pane_grid::Axis) -> Task<Message> {
-        let Some(new_pane) = self.create_pane() else {
+        let cwd = self.inherited_cwd();
+        let Some(new_pane) = self.create_pane(cwd) else {
             return Task::none();
         };
         if let Some(tab) = self.active_tab_mut() {
@@ -731,7 +760,7 @@ impl Quake {
             }
             None => {
                 // Nothing left: prepare a fresh shell for the next toggle and hide.
-                let fresh = self.new_tab();
+                let fresh = self.new_tab(None);
                 Task::batch([fresh, self.hide()])
             }
         }
@@ -865,6 +894,8 @@ impl Quake {
                     .then(|| stored.set_animation_ms(handler, new.animation_ms)),
                 (new.monitor != old.monitor)
                     .then(|| stored.set_monitor(handler, new.monitor.clone())),
+                (new.inherit_cwd != old.inherit_cwd)
+                    .then(|| stored.set_inherit_cwd(handler, new.inherit_cwd)),
             ];
             for err in results.into_iter().flatten().filter_map(Result::err) {
                 log::warn!("failed to save settings: {err}");
@@ -1135,6 +1166,13 @@ impl Quake {
                 widget::dropdown(&self.monitor_choices, selected, Message::MonitorSelected),
             ));
 
+        let terminals = widget::settings::section()
+            .title(fl!("settings-terminals"))
+            .add(widget::settings::item(
+                fl!("settings-inherit-cwd"),
+                widget::toggler(draft.inherit_cwd).on_toggle(Message::InheritToggle),
+            ));
+
         let mut animation = widget::settings::section()
             .title(fl!("settings-animation"))
             .add(widget::settings::item(
@@ -1158,6 +1196,7 @@ impl Quake {
             header.into(),
             size.into(),
             monitor.into(),
+            terminals.into(),
             animation.into(),
             widget::button::standard(fl!("settings-reset"))
                 .on_press(Message::SettingsReset)
@@ -1329,7 +1368,7 @@ impl Application for Quake {
         app.update_theme_state();
         app.sync_field_text();
         // Start the first shell right away so the very first frame already shows it.
-        let _ = app.new_tab();
+        let _ = app.new_tab(None);
         let task = if flags.start_visible {
             app.show()
         } else {
@@ -1461,7 +1500,10 @@ impl Application for Quake {
                 }
                 _ => {}
             },
-            Message::NewTab => return self.new_tab(),
+            Message::NewTab => {
+                let cwd = self.inherited_cwd();
+                return self.new_tab(cwd);
+            }
             Message::ClosePane => {
                 let id = self.active_tab().and_then(Tab::focused).map(|pane| pane.id);
                 if let Some(id) = id {
@@ -1521,7 +1563,8 @@ impl Application for Quake {
                     dbus::Command::Quit => cosmic::iced::exit(),
                     dbus::Command::NewTab => {
                         let show = self.show();
-                        return Task::batch([show, self.new_tab()]);
+                        let cwd = self.inherited_cwd();
+                        return Task::batch([show, self.new_tab(cwd)]);
                     }
                     dbus::Command::SplitHorizontal => {
                         let show = self.show();
@@ -1683,6 +1726,11 @@ impl Application for Quake {
                     0 => String::new(),
                     _ => self.monitor_choices.get(index).cloned().unwrap_or_default(),
                 };
+                return self.commit_quake(new);
+            }
+            Message::InheritToggle(on) => {
+                let mut new = self.draft.clone();
+                new.inherit_cwd = on;
                 return self.commit_quake(new);
             }
             Message::AnimationToggle(on) => {

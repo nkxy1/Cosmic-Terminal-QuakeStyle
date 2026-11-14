@@ -179,6 +179,8 @@ impl Metadata {
 }
 
 pub struct Terminal {
+    /// Process id of the shell, used to find its working directory.
+    child_pid: u32,
     pub context_menu: Option<MenuState>,
     pub metadata_set: IndexSet<Metadata>,
     pub needs_update: bool,
@@ -270,6 +272,7 @@ impl Terminal {
 
         let window_id = 0;
         let pty = tty::new(&options, size.into(), window_id)?;
+        let child_pid = pty.child().id();
 
         let pty_event_loop =
             EventLoop::new(term.clone(), event_proxy, pty, options.drain_on_exit, false)?;
@@ -277,6 +280,7 @@ impl Terminal {
         let _pty_join_handle = pty_event_loop.spawn();
 
         Ok(Self {
+            child_pid,
             active_regex_match: None,
             active_hyperlink_id: None,
             url_regex_search: url_regex_search(),
@@ -305,6 +309,14 @@ impl Terminal {
 
     pub fn set_focused(&mut self, focused: bool) {
         self.is_focused = focused;
+    }
+
+    /// Current working directory of the shell, so new tabs and splits can start there.
+    /// `None` if it cannot be read (process gone, directory deleted, no /proc).
+    pub fn working_directory(&self) -> Option<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/{}/cwd", self.child_pid))
+            .ok()
+            .filter(|path| path.is_dir())
     }
 
     pub fn buffer_weak(&self) -> Weak<Buffer> {

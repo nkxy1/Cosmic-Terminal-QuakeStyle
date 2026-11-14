@@ -25,6 +25,8 @@ pub struct QuakeConfig {
     pub animation_ms: u16,
     /// Name of the output to show the terminal on; empty = the active output.
     pub monitor: String,
+    /// New tabs and splits start in the working directory of the focused terminal.
+    pub inherit_cwd: bool,
 }
 
 impl Default for QuakeConfig {
@@ -34,6 +36,7 @@ impl Default for QuakeConfig {
             width_percent: 100,
             animation_ms: DEFAULT_ANIMATION_MS,
             monitor: String::new(),
+            inherit_cwd: true,
         }
     }
 }
@@ -81,6 +84,7 @@ pub struct Update {
     pub width: Option<u16>,
     pub animation_ms: Option<u16>,
     pub monitor: Option<String>,
+    pub inherit_cwd: Option<bool>,
 }
 
 /// Parse the argument of `--animation`: `on`, `off` or a duration in milliseconds.
@@ -119,5 +123,19 @@ pub fn save(update: Update) -> Result<QuakeConfig, String> {
             .set_monitor(&handler, monitor)
             .map_err(|e| e.to_string())?;
     }
+    if let Some(inherit) = update.inherit_cwd {
+        config
+            .set_inherit_cwd(&handler, inherit)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(config)
+}
+
+/// Parse `on` / `off` (also accepts `true`/`false`, `yes`/`no`, `1`/`0`).
+pub fn parse_switch(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }

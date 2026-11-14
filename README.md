@@ -19,12 +19,13 @@ and panel use.
   with the mouse to resize, the new height is remembered
 - Tabs and splits: several tabs (a tab bar appears from the second tab on), each tab can
   be split horizontally and vertically into any number of terminals; drag the dividers to
-  resize, drag a pane to rearrange
+  resize, drag a pane to rearrange; new tabs and splits start in the working directory of
+  the focused terminal (can be switched off, then they start in `$HOME`)
 - Monitor choice: the active monitor (default) or a fixed one, set in the settings or with
   `--monitor`; if the chosen monitor is not connected the active one is used
 - Slide animation (default 300 ms, can be changed or switched off)
-- Settings page (right-click → *Settings*): height, width, monitor and animation with
-  sliders, text fields and a drop-down, everything applied immediately; the same values
+- Settings page (right-click → *Settings*): height, width, monitor, working directory
+  behaviour and animation with sliders, text fields, a drop-down and switches, everything applied immediately; the same values
   are available on the command line
 - Follows the system appearance: accent color, dark/light, and the translucent
   "frosted" look (transparency level and blur) chosen in COSMIC Settings
@@ -80,6 +81,7 @@ cosmic-quake-term --height N   height in percent of the screen, 10-100
 cosmic-quake-term --width N    width in percent of the screen, 10-100 (centered)
 cosmic-quake-term --animation on|off|MS   slide animation, `on` = 300 ms, max 2000
 cosmic-quake-term --monitor NAME|active    show on a fixed monitor, or the active one
+cosmic-quake-term --inherit-cwd on|off     new tabs/splits start in the current directory
 cosmic-quake-term --list-monitors          names of the connected monitors
 cosmic-quake-term --new-tab                open a new tab (shows the terminal)
 cosmic-quake-term --split-horizontal       split the focused terminal top/bottom
@@ -125,7 +127,8 @@ and a fresh shell is ready for the next toggle.
   behind it (clicks beside the terminal go to the terminal's surface until you release)
 - Shortcuts on non-Latin keyboard layouts (e.g. Cyrillic) fall back to the logical key
   only
-- New tabs and splits always start in the home directory
+- The directory is taken from the shell process (`/proc/<pid>/cwd`), not from the program
+  running in the foreground, and only works on Linux
 - Tabs cannot be reordered by dragging
 - "Active monitor" means the output the compositor considers active; whether that follows the
   mouse pointer or the keyboard focus is decided by COSMIC
