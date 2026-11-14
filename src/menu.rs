@@ -5,9 +5,7 @@ use std::collections::HashMap;
 
 use cosmic::{
     Element,
-    iced::{
-        Background, Length, Point, advanced::widget::text::Style as TextStyle, core::Border,
-    },
+    iced::{Background, Length, Point, advanced::widget::text::Style as TextStyle, core::Border},
     theme,
     widget::{
         self, Column, divider,
@@ -62,8 +60,22 @@ pub fn context_menu<'a>(
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
 
     if link.is_some() {
-        rows.push(item(fl!("menu-open-link"), String::new(), Some(Message::OpenLink)).into());
-        rows.push(item(fl!("menu-copy-link"), String::new(), Some(Message::CopyLink)).into());
+        rows.push(
+            item(
+                fl!("menu-open-link"),
+                String::new(),
+                Some(Message::OpenLink),
+            )
+            .into(),
+        );
+        rows.push(
+            item(
+                fl!("menu-copy-link"),
+                String::new(),
+                Some(Message::CopyLink),
+            )
+            .into(),
+        );
         rows.push(divider::horizontal::light().into());
     }
 
@@ -99,9 +111,7 @@ pub fn context_menu<'a>(
         (fl!("menu-new-tab"), Action::NewTab),
         (fl!("menu-close"), Action::ClosePane),
     ] {
-        rows.push(
-            item(label, find_key(&action), Some(Message::MenuAction(action))).into(),
-        );
+        rows.push(item(label, find_key(&action), Some(Message::MenuAction(action))).into());
     }
     rows.push(divider::horizontal::light().into());
     rows.push(

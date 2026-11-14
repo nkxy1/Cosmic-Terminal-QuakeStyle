@@ -1189,7 +1189,9 @@ where
                     {
                         let now = Instant::now();
                         match state.middle_click.take() {
-                            Some(previous) if now.duration_since(previous) < MIDDLE_DOUBLE_CLICK => {
+                            Some(previous)
+                                if now.duration_since(previous) < MIDDLE_DOUBLE_CLICK =>
+                            {
                                 shell.publish(on_double_click());
                                 shell.capture_event();
                                 return;

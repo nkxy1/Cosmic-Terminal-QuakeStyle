@@ -16,9 +16,7 @@ use alacritty_terminal::{
     tty::{self, Options},
     vte::ansi::{Color, CursorShape, NamedColor, Rgb},
 };
-use cosmic::{
-    iced::{advanced::graphics::text::font_system, mouse::ScrollDelta},
-};
+use cosmic::iced::{advanced::graphics::text::font_system, mouse::ScrollDelta};
 use cosmic_text::{
     Attrs, AttrsList, Buffer, BufferLine, CacheKeyFlags, Family, LineEnding, Metrics, Shaping,
     Weight, Wrap,

@@ -70,7 +70,10 @@ impl Service {
     }
 
     fn list_monitors(&self) -> Vec<String> {
-        MONITOR_NAMES.lock().map(|names| names.clone()).unwrap_or_default()
+        MONITOR_NAMES
+            .lock()
+            .map(|names| names.clone())
+            .unwrap_or_default()
     }
 }
 

@@ -15,8 +15,13 @@ build-debug *args:
 build-release *args:
     cargo build --release {{args}}
 
+# Formatting and lints; run before committing.
 check:
+    cargo fmt --check
     cargo clippy --all-targets
+
+fmt:
+    cargo fmt
 
 run *args:
     cargo run --release -- {{args}}

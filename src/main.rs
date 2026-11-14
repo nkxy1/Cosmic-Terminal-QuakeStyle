@@ -27,13 +27,11 @@ use alacritty_terminal::{event::Event as TermEvent, term, term::color::Colors as
 use cosmic::{
     Application, Element,
     app::{Core, Settings, Task},
+    cctk::sctk::reexports::client::protocol::wl_output::WlOutput,
     cosmic_config::{self, CosmicConfigEntry},
-    iced::{
-        self, Color, Event, Length, Point, Rectangle, Size, Subscription, clipboard, mouse,
-        event,
-        futures::SinkExt,
-        keyboard::{Event as KeyEvent, Key, Modifiers, key::Named},
-        stream, window,
+    iced::event::{
+        PlatformSpecific,
+        wayland::{Event as WaylandEvent, OutputEvent},
     },
     iced::platform_specific::{
         runtime::wayland::layer_surface::{IcedOutput, SctkLayerSurfaceSettings},
@@ -43,9 +41,17 @@ use cosmic::{
             set_anchor, set_keyboard_interactivity, set_size,
         },
     },
-    cctk::sctk::reexports::client::protocol::wl_output::WlOutput,
-    iced::event::{PlatformSpecific, wayland::{Event as WaylandEvent, OutputEvent}},
-    widget::{self, menu::key_bind::{KeyBind, Modifier}, pane_grid, segmented_button},
+    iced::{
+        self, Color, Event, Length, Point, Rectangle, Size, Subscription, clipboard, event,
+        futures::SinkExt,
+        keyboard::{Event as KeyEvent, Key, Modifiers, key::Named},
+        mouse, stream, window,
+    },
+    widget::{
+        self,
+        menu::key_bind::{KeyBind, Modifier},
+        pane_grid, segmented_button,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -111,7 +117,11 @@ fn default_key_binds() -> HashMap<KeyBind, Action> {
     bind(&[Modifier::Ctrl], Key::Named(Named::Tab), Action::NextTab);
     bind(&cs, Key::Named(Named::Tab), Action::PrevTab);
     for n in 0..9usize {
-        bind(&cs, Key::Character((n + 1).to_string().into()), Action::ActivateTab(n));
+        bind(
+            &cs,
+            Key::Character((n + 1).to_string().into()),
+            Action::ActivateTab(n),
+        );
     }
     bind(&cs, Key::Named(Named::ArrowLeft), Action::FocusLeft);
     bind(&cs, Key::Character("H".into()), Action::FocusLeft);
@@ -121,10 +131,22 @@ fn default_key_binds() -> HashMap<KeyBind, Action> {
     bind(&cs, Key::Character("K".into()), Action::FocusUp);
     bind(&cs, Key::Named(Named::ArrowDown), Action::FocusDown);
     bind(&cs, Key::Character("J".into()), Action::FocusDown);
-    bind(&[Modifier::Ctrl], Key::Character("=".into()), Action::ZoomIn);
+    bind(
+        &[Modifier::Ctrl],
+        Key::Character("=".into()),
+        Action::ZoomIn,
+    );
     bind(&cs, Key::Character("+".into()), Action::ZoomIn);
-    bind(&[Modifier::Ctrl], Key::Character("-".into()), Action::ZoomOut);
-    bind(&[Modifier::Ctrl], Key::Character("0".into()), Action::ZoomReset);
+    bind(
+        &[Modifier::Ctrl],
+        Key::Character("-".into()),
+        Action::ZoomOut,
+    );
+    bind(
+        &[Modifier::Ctrl],
+        Key::Character("0".into()),
+        Action::ZoomReset,
+    );
     map
 }
 
@@ -180,7 +202,10 @@ fn main() -> iced::Result {
             }
             false
         }
-        Some(flag @ ("--toggle" | "--show" | "--hide" | "--quit" | "--new-tab" | "--split-horizontal" | "--split-vertical")) => {
+        Some(
+            flag @ ("--toggle" | "--show" | "--hide" | "--quit" | "--new-tab"
+            | "--split-horizontal" | "--split-vertical"),
+        ) => {
             let command = match flag {
                 "--toggle" => dbus::Command::Toggle,
                 "--show" => dbus::Command::Show,
@@ -232,14 +257,12 @@ fn main() -> iced::Result {
                 };
                 match flag.as_str() {
                     "--height" => {
-                        update.height = Some(
-                            value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(0)),
-                        )
+                        update.height =
+                            Some(value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(0)))
                     }
                     "--width" => {
-                        update.width = Some(
-                            value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(0)),
-                        )
+                        update.width =
+                            Some(value.and_then(|v| v.parse().ok()).unwrap_or_else(|| bad(0)))
                     }
                     "--animation" => {
                         update.animation_ms = Some(
@@ -270,7 +293,11 @@ fn main() -> iced::Result {
                         )
                     }
                     _ => {
-                        eprintln!("{}\n\n{}", fl!("cli-unknown-argument", argument = flag), usage());
+                        eprintln!(
+                            "{}\n\n{}",
+                            fl!("cli-unknown-argument", argument = flag),
+                            usage()
+                        );
                         std::process::exit(2);
                     }
                 }
@@ -309,7 +336,11 @@ fn main() -> iced::Result {
             std::process::exit(0);
         }
         Some(other) => {
-            eprintln!("{}\n\n{}", fl!("cli-unknown-argument", argument = other), usage());
+            eprintln!(
+                "{}\n\n{}",
+                fl!("cli-unknown-argument", argument = other),
+                usage()
+            );
             std::process::exit(2);
         }
     };
@@ -578,10 +609,16 @@ impl Quake {
             }
         }
 
-        let color = Color::from(self.config.app_theme.theme().cosmic().background(false).base);
+        let color = Color::from(
+            self.config
+                .app_theme
+                .theme()
+                .cosmic()
+                .background(false)
+                .base,
+        );
         let b = color.into_rgba8();
-        let data =
-            u32::from(b[2]) | (u32::from(b[1]) << 8) | (u32::from(b[0]) << 16) | 0xFF000000;
+        let data = u32::from(b[2]) | (u32::from(b[1]) << 8) | (u32::from(b[0]) << 16) | 0xFF000000;
         terminal::WINDOW_BG_COLOR.store(data, Ordering::SeqCst);
     }
 
@@ -947,8 +984,8 @@ impl Quake {
             let show = self.show();
             return Task::batch([hide, show]);
         }
-        let resized = new.height_percent != old.height_percent
-            || new.width_percent != old.width_percent;
+        let resized =
+            new.height_percent != old.height_percent || new.width_percent != old.width_percent;
         let (Some(id), Some(output)) = (self.surface, self.output_size) else {
             return Task::none();
         };
@@ -971,7 +1008,14 @@ impl Quake {
 
     /// Is the terminal on screen and not on its way out?
     fn is_shown(&self) -> bool {
-        self.surface.is_some() && !matches!(self.slide, Some(Slide { dir: SlideDir::Out, .. }))
+        self.surface.is_some()
+            && !matches!(
+                self.slide,
+                Some(Slide {
+                    dir: SlideDir::Out,
+                    ..
+                })
+            )
     }
 
     fn start_slide(&mut self, dir: SlideDir) {
@@ -986,7 +1030,13 @@ impl Quake {
     fn show(&mut self) -> Task<Message> {
         if let Some(id) = self.surface {
             // Shown again while sliding out: turn around instead of doing nothing.
-            if matches!(self.slide, Some(Slide { dir: SlideDir::Out, .. })) {
+            if matches!(
+                self.slide,
+                Some(Slide {
+                    dir: SlideDir::Out,
+                    ..
+                })
+            ) {
                 self.start_slide(SlideDir::In);
                 return Task::batch([
                     set_keyboard_interactivity(id, KeyboardInteractivity::OnDemand),
@@ -1044,7 +1094,13 @@ impl Quake {
         if self.measuring || self.resizing || self.animation_ms() == 0 {
             return self.hide_now();
         }
-        if matches!(self.slide, Some(Slide { dir: SlideDir::Out, .. })) {
+        if matches!(
+            self.slide,
+            Some(Slide {
+                dir: SlideDir::Out,
+                ..
+            })
+        ) {
             return Task::none();
         }
         self.start_slide(SlideDir::Out);
@@ -1106,7 +1162,10 @@ impl Quake {
         }
         blur(
             id,
-            Some(vec![Rectangle::new(Point::new(x, 0.0), Size::new(width, height))]),
+            Some(vec![Rectangle::new(
+                Point::new(x, 0.0),
+                Size::new(width, height),
+            )]),
         )
         .map(|()| cosmic::Action::None)
     }
@@ -1236,7 +1295,9 @@ impl Quake {
         let selected = if draft.monitor.is_empty() {
             Some(0)
         } else {
-            self.monitor_choices.iter().position(|name| *name == draft.monitor)
+            self.monitor_choices
+                .iter()
+                .position(|name| *name == draft.monitor)
         };
         let monitor = widget::settings::section()
             .title(fl!("settings-monitor"))
@@ -1739,9 +1800,12 @@ impl Application for Quake {
                 }
             }
             Message::ResizeStart(edge) => {
-                if let (Some(id), false, true, Some((output_w, output_h))) =
-                    (self.surface, self.measuring, self.slide.is_none(), self.output_size)
-                {
+                if let (Some(id), false, true, Some((output_w, output_h))) = (
+                    self.surface,
+                    self.measuring,
+                    self.slide.is_none(),
+                    self.output_size,
+                ) {
                     self.resizing = true;
                     self.resize_edge = Some(edge);
                     self.shrink_pending = false;
@@ -1768,9 +1832,12 @@ impl Application for Quake {
                 }
             }
             Message::ResizeMove(point) => {
-                let (true, Some(edge), Some((output_w, output_h)), Some(id)) =
-                    (self.resizing, self.resize_edge, self.output_size, self.surface)
-                else {
+                let (true, Some(edge), Some((output_w, output_h)), Some(id)) = (
+                    self.resizing,
+                    self.resize_edge,
+                    self.output_size,
+                    self.surface,
+                ) else {
                     return Task::none();
                 };
                 let min = f32::from(settings::MIN_PERCENT) / 100.0;
@@ -2003,7 +2070,10 @@ impl Application for Quake {
                 .sharp_corners(true)
                 .show_headerbar(false);
 
-            let menu = self.context_menu.as_ref().filter(|(menu_pane, _)| *menu_pane == pane);
+            let menu = self
+                .context_menu
+                .as_ref()
+                .filter(|(menu_pane, _)| *menu_pane == pane);
             let element: Element<'_, Message> = match menu {
                 None => terminal_box.into(),
                 Some((_, menu_state)) => {
