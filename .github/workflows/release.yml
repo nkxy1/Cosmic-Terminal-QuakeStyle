@@ -53,7 +53,8 @@ jobs:
   rpm:
     name: Fedora package
     runs-on: ubuntu-24.04
-    container: fedora:latest
+    # Pinned: the package needs at least the glibc of the Fedora it is built on.
+    container: fedora:45
     steps:
       - name: Install build dependencies
         run: |
@@ -111,13 +112,13 @@ jobs:
           cat > notes.md <<'NOTES'
           ## Installation
 
-          **Debian / Ubuntu / Pop!_OS** (amd64):
+          **Debian / Ubuntu / Pop!_OS** (amd64, glibc 2.39+, e.g. Ubuntu 24.04):
 
           ```sh
           sudo apt install ./cosmic-quake-term_*_amd64.deb
           ```
 
-          **Fedora** (x86_64):
+          **Fedora 45 or newer** (x86_64):
 
           ```sh
           sudo dnf install ./cosmic-quake-term-*.x86_64.rpm

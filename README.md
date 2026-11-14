@@ -58,6 +58,13 @@ sudo apt install ./cosmic-quake-term_*_amd64.deb
 sudo dnf install ./cosmic-quake-term-*.x86_64.rpm
 ```
 
+| Package | Built on | Needs |
+| --- | --- | --- |
+| `.deb` (amd64) | Ubuntu 24.04 | glibc 2.39 or newer: Ubuntu 24.04+, Debian 13+, Pop!_OS 24.04+ |
+| `.rpm` (x86_64) | Fedora 45 | glibc 2.44 or newer: Fedora 45+ |
+
+On other distributions or older releases, build from source (below).
+
 The packages install the program, a launcher entry and an autostart entry
 (`/etc/xdg/autostart`) that starts the background daemon at login; remove or override it
 in COSMIC's startup applications if you do not want that. The first `--toggle` starts the
