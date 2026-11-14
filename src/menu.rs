@@ -16,7 +16,7 @@ use cosmic::{
     },
 };
 
-use crate::{Action, Message};
+use crate::{Action, Message, fl};
 
 #[derive(Clone, Debug, Default)]
 pub struct MenuState {
@@ -48,7 +48,7 @@ pub fn context_menu<'a>(
         }
     }
 
-    let item = |label: &'static str, key: String, message: Option<Message>| {
+    let item = |label: String, key: String, message: Option<Message>| {
         menu_button(vec![
             widget::text(label).into(),
             space::horizontal().into(),
@@ -62,14 +62,14 @@ pub fn context_menu<'a>(
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
 
     if link.is_some() {
-        rows.push(item("Open link", String::new(), Some(Message::OpenLink)).into());
-        rows.push(item("Copy link", String::new(), Some(Message::CopyLink)).into());
+        rows.push(item(fl!("menu-open-link"), String::new(), Some(Message::OpenLink)).into());
+        rows.push(item(fl!("menu-copy-link"), String::new(), Some(Message::CopyLink)).into());
         rows.push(divider::horizontal::light().into());
     }
 
     rows.push(
         item(
-            "Copy",
+            fl!("menu-copy"),
             find_key(&Action::Copy),
             has_selection.then_some(Message::MenuAction(Action::Copy)),
         )
@@ -77,7 +77,7 @@ pub fn context_menu<'a>(
     );
     rows.push(
         item(
-            "Paste",
+            fl!("menu-paste"),
             find_key(&Action::Paste),
             Some(Message::MenuAction(Action::Paste)),
         )
@@ -85,9 +85,19 @@ pub fn context_menu<'a>(
     );
     rows.push(
         item(
-            "Select all",
+            fl!("menu-select-all"),
             find_key(&Action::SelectAll),
             Some(Message::MenuAction(Action::SelectAll)),
+        )
+        .into(),
+    );
+
+    rows.push(divider::horizontal::light().into());
+    rows.push(
+        item(
+            fl!("menu-settings"),
+            String::new(),
+            Some(Message::MenuAction(Action::Settings)),
         )
         .into(),
     );

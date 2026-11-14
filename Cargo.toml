@@ -17,6 +17,9 @@ regex = "1"
 ron = "0.11"
 serde = { version = "1", features = ["serde_derive"] }
 shlex = "1"
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+rust-embed = "8"
 zbus = "5"
 
 [dependencies.libcosmic]

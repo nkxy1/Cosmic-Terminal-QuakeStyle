@@ -13,19 +13,25 @@ and panel use.
 
 ## Features
 
-- Overlay anchored to the top edge, takes keyboard focus immediately
-- Size in percent of the screen (default 40 % high, 100 % wide), changeable with
-  `--height`/`--width`; drag the bottom edge with the mouse to resize, the new height
-  is remembered
+- Drops down from the top edge below the panel and takes keyboard focus immediately;
+  panel applet popups stay visible above it
+- Size in percent of the screen (default 40 % high, 100 % wide); drag the bottom edge
+  with the mouse to resize, the new height is remembered
+- Slide animation (default 300 ms, can be changed or switched off)
+- Settings page (right-click → *Settings*): height, width and animation with sliders
+  and text fields, everything applied immediately; the same values are available on
+  the command line
 - Follows the system appearance: accent color, dark/light, and the translucent
   "frosted" look (transparency level and blur) chosen in COSMIC Settings
 - Reuses your **cosmic-term settings** (font, color scheme, opacity) —
   change them in cosmic-term and the drop-down terminal follows
 - Copy/paste (`Ctrl+Shift+C` / `Ctrl+Shift+V`), select all (`Ctrl+Shift+A`), zoom
-  (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`)
+  (`Ctrl+=`, `Ctrl+-`, `Ctrl+0` or `Ctrl` + mouse wheel)
 - Right-click menu: copy, paste, select all, open/copy link
 - Controlled over D-Bus, so any COSMIC custom shortcut can drive it
 - Shell exits (`exit`) → hides and starts a fresh shell for the next toggle
+- English and German; the language follows the system locale (`LANGUAGE`, `LC_ALL`,
+  `LC_MESSAGES`, `LANG`), other locales fall back to English
 
 ## Install
 
@@ -66,10 +72,12 @@ cosmic-quake-term --quit       stop the running daemon
 cosmic-quake-term --daemon     start hidden in the background (for autostart)
 cosmic-quake-term --height N   height in percent of the screen, 10-100
 cosmic-quake-term --width N    width in percent of the screen, 10-100 (centered)
+cosmic-quake-term --animation on|off|MS   slide animation, `on` = 300 ms, max 2000
 ```
 
-`--height` and `--width` can be combined and are applied live by a running daemon.
-They are stored in `~/.config/cosmic/dev.norman.CosmicQuakeTerm/v1/`.
+`--height`, `--width` and `--animation` can be combined and are applied live by a
+running daemon. They are stored in `~/.config/cosmic/dev.norman.CosmicQuakeTerm/v1/`.
+The same values can be changed in the settings page (right-click → *Settings*).
 
 The D-Bus API is `dev.norman.CosmicQuakeTerm` on the session bus, object
 `/dev/norman/CosmicQuakeTerm`, methods `Toggle`, `Show`, `Hide`, `Quit`:
@@ -81,23 +89,27 @@ busctl --user call dev.norman.CosmicQuakeTerm /dev/norman/CosmicQuakeTerm \
 
 ## Limitations / TODO
 
-- Width can only be changed with `--width`, not with the mouse
-- No slide animation
+- Width can only be changed with the settings or `--width`, not with the mouse
+- The surface sits on the `top` layer (like the panel) so applet popups can appear above
+  it; fullscreen windows therefore cover the terminal
 - While dragging the bottom edge, a transparent screen-height area covers the windows
   behind it (clicks beside the terminal go to the terminal's surface until you release)
 - Shortcuts on non-Latin keyboard layouts (e.g. Cyrillic) fall back to the logical key
   only
 - Single terminal: no tabs or splits
-- The context menu is English only
 - Shows on the active output only
 
 ## How it is built
 
 `libcosmic` (iced + sctk) provides the layer-shell surface. The terminal itself —
 `terminal.rs`, `terminal_box.rs`, `mouse_reporter.rs`, `terminal_theme.rs`, `config.rs`,
-and the context menu in `menu.rs` — is derived from
+the context menu in `menu.rs` and `localize.rs` — is derived from
 [cosmic-term](https://github.com/pop-os/cosmic-term) with tabs, panes and settings UI
-removed.
+removed. `slide.rs` is a reduced copy of iced's `Float` widget that moves the content
+for the slide animation (the surface itself never moves, so the panel is not overdrawn).
+
+Translations live in `i18n/<language>/cosmic_quake_term.ftl` (Fluent). To add a language,
+copy `i18n/en`, translate it and add `Name[xx]`/`Comment[xx]` to the `.desktop` files.
 
 libcosmic is pinned to a revision in `Cargo.toml`. It must read the same theme config
 version as your COSMIC release (COSMIC 1.10 stores it under `…/v2`); an older libcosmic

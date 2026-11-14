@@ -120,6 +120,7 @@ pub struct TerminalBox<'a, Message> {
     opacity: Option<f32>,
     mouse_inside_boundary: Option<bool>,
     on_middle_click: Option<Box<dyn Fn() -> Message + 'a>>,
+    on_zoom: Option<Box<dyn Fn(i8) -> Message + 'a>>,
     on_open_hyperlink: Option<Box<dyn Fn(String) -> Message + 'a>>,
     on_window_focused: Option<Box<dyn Fn() -> Message + 'a>>,
     on_window_unfocused: Option<Box<dyn Fn() -> Message + 'a>>,
@@ -146,6 +147,7 @@ where
             opacity: None,
             mouse_inside_boundary: None,
             on_middle_click: None,
+            on_zoom: None,
             key_binds,
             on_open_hyperlink: None,
             on_window_focused: None,
@@ -200,6 +202,13 @@ where
 
     pub fn on_middle_click(mut self, on_middle_click: impl Fn() -> Message + 'a) -> Self {
         self.on_middle_click = Some(Box::new(on_middle_click));
+        self
+    }
+
+    /// Called with the number of zoom steps (positive = larger) when the mouse wheel is
+    /// turned while Ctrl is held.
+    pub fn on_zoom(mut self, on_zoom: impl Fn(i8) -> Message + 'a) -> Self {
+        self.on_zoom = Some(Box::new(on_zoom));
         self
     }
 
@@ -1475,6 +1484,25 @@ where
             }
             Event::Mouse(MouseEvent::WheelScrolled { delta }) => {
                 if let Some(p) = cursor_position.position_in(layout.bounds()) {
+                    // Ctrl + wheel zooms the text instead of scrolling. Handled before
+                    // mouse reporting so it also works inside full-screen programs.
+                    if state.modifiers.control() && !state.modifiers.alt() && !state.modifiers.logo()
+                    {
+                        if let Some(on_zoom) = &self.on_zoom {
+                            let notches = match delta {
+                                ScrollDelta::Lines { y, .. } => *y,
+                                ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                            };
+                            state.zoom_wheel += notches;
+                            let steps = state.zoom_wheel.trunc();
+                            if steps != 0.0 {
+                                state.zoom_wheel -= steps;
+                                shell.publish(on_zoom(steps as i8));
+                            }
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     if is_mouse_mode {
                         let x = p.x - self.padding.left;
                         let y = p.y - self.padding.top;
@@ -1862,6 +1890,8 @@ pub struct State {
     dragging: Option<Dragging>,
     is_focused: bool,
     scroll_pixels: f32,
+    /// Fractional wheel notches collected for Ctrl+wheel zoom.
+    zoom_wheel: f32,
     scrollbar_rect: Cell<Rectangle<f32>>,
     autoscroll: DragAutoscroll,
 }
@@ -1875,6 +1905,7 @@ impl State {
             dragging: None,
             is_focused: false,
             scroll_pixels: 0.0,
+            zoom_wheel: 0.0,
             scrollbar_rect: Cell::new(Rectangle::default()),
             autoscroll: DragAutoscroll::new(AUTOSCROLL_INTERVAL),
         }

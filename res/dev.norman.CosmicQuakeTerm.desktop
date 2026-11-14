@@ -1,7 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Quake Terminal
+Name[de]=Quake-Terminal
 Comment=Drop-down terminal for COSMIC
+Comment[de]=Ausklappbares Terminal für COSMIC
 Exec=cosmic-quake-term --toggle
 Icon=utilities-terminal
 Terminal=false

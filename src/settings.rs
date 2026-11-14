@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 pub const ID: &str = "dev.norman.CosmicQuakeTerm";
 pub const VERSION: u64 = 1;
 
+pub const DEFAULT_ANIMATION_MS: u16 = 300;
+pub const MIN_ANIMATION_MS: u16 = 50;
+pub const MAX_ANIMATION_MS: u16 = 2000;
 pub const MIN_PERCENT: u16 = 10;
 pub const MAX_PERCENT: u16 = 100;
 
@@ -18,6 +21,8 @@ pub struct QuakeConfig {
     pub height_percent: u16,
     /// Width as a percentage of the output width; the terminal is centered.
     pub width_percent: u16,
+    /// Slide animation duration in milliseconds; 0 turns the animation off.
+    pub animation_ms: u16,
 }
 
 impl Default for QuakeConfig {
@@ -25,6 +30,7 @@ impl Default for QuakeConfig {
         Self {
             height_percent: 40,
             width_percent: 100,
+            animation_ms: DEFAULT_ANIMATION_MS,
         }
     }
 }
@@ -65,18 +71,43 @@ pub fn load() -> (Option<cosmic_config::Config>, QuakeConfig) {
     }
 }
 
-/// Persist a value from the command line; a running daemon picks it up live.
-pub fn save(height: Option<u16>, width: Option<u16>) -> Result<QuakeConfig, String> {
+/// Values given on the command line; `None` leaves the stored value untouched.
+#[derive(Default)]
+pub struct Update {
+    pub height: Option<u16>,
+    pub width: Option<u16>,
+    pub animation_ms: Option<u16>,
+}
+
+/// Parse the argument of `--animation`: `on`, `off` or a duration in milliseconds.
+pub fn parse_animation(value: &str) -> Option<u16> {
+    match value {
+        "on" => Some(DEFAULT_ANIMATION_MS),
+        "off" => Some(0),
+        ms => ms
+            .parse::<u32>()
+            .ok()
+            .map(|ms| ms.min(u32::from(MAX_ANIMATION_MS)) as u16),
+    }
+}
+
+/// Persist values from the command line; a running daemon picks them up live.
+pub fn save(update: Update) -> Result<QuakeConfig, String> {
     let (handler, mut config) = load();
     let handler = handler.ok_or("cannot open the config store")?;
-    if let Some(height) = height {
+    if let Some(height) = update.height {
         config
             .set_height_percent(&handler, clamp_percent(height))
             .map_err(|e| e.to_string())?;
     }
-    if let Some(width) = width {
+    if let Some(width) = update.width {
         config
             .set_width_percent(&handler, clamp_percent(width))
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(ms) = update.animation_ms {
+        config
+            .set_animation_ms(&handler, ms.min(MAX_ANIMATION_MS))
             .map_err(|e| e.to_string())?;
     }
     Ok(config)
