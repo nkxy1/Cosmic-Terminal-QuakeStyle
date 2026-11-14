@@ -112,5 +112,5 @@ pub fn send(command: Command) -> zbus::Result<()> {
 pub fn list_monitors() -> zbus::Result<Vec<String>> {
     let conn = zbus::blocking::Connection::session()?;
     let reply = conn.call_method(Some(NAME), PATH, Some(NAME), "ListMonitors", &())?;
-    Ok(reply.body().deserialize::<Vec<String>>()?)
+    reply.body().deserialize::<Vec<String>>()
 }

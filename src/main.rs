@@ -735,10 +735,10 @@ impl Quake {
         let tab = &mut self.tabs[index];
         if tab.panes.iter().count() > 1 {
             if let Some(handle) = tab.pane_of(id) {
-                if let Some((_closed, sibling)) = tab.panes.close(handle) {
-                    if tab.focus == handle {
-                        tab.focus = sibling;
-                    }
+                if let Some((_closed, sibling)) = tab.panes.close(handle)
+                    && tab.focus == handle
+                {
+                    tab.focus = sibling;
                 }
                 tab.sync_focus();
             }
@@ -848,11 +848,12 @@ impl Quake {
     }
 
     fn focus_pane(&mut self, pane: pane_grid::Pane) -> Task<Message> {
-        if let Some(tab) = self.active_tab_mut() {
-            if tab.panes.get(pane).is_some() && tab.focus != pane {
-                tab.focus = pane;
-                tab.sync_focus();
-            }
+        if let Some(tab) = self.active_tab_mut()
+            && tab.panes.get(pane).is_some()
+            && tab.focus != pane
+        {
+            tab.focus = pane;
+            tab.sync_focus();
         }
         self.focus_task()
     }
@@ -1495,10 +1496,10 @@ impl Application for Quake {
             Message::OpenLink => {
                 let link = self.context_menu.as_ref().and_then(|(_, m)| m.link.clone());
                 self.close_context_menu();
-                if let Some(link) = link {
-                    if let Err(err) = open::that_detached(&link) {
-                        log::warn!("failed to open {link:?}: {err}");
-                    }
+                if let Some(link) = link
+                    && let Err(err) = open::that_detached(&link)
+                {
+                    log::warn!("failed to open {link:?}: {err}");
                 }
             }
             Message::CopyLink => {
@@ -1540,18 +1541,15 @@ impl Application for Quake {
                 }
             }
             Message::TermEvent(id, event) => match event {
-                TermEvent::ClipboardLoad(kind, callback) => {
-                    if let term::ClipboardType::Clipboard = kind {
-                        return clipboard::read().map(move |data| {
-                            callback(&data.unwrap_or_default());
-                            cosmic::Action::None
-                        });
-                    }
+                // Only the regular clipboard is supported, not the primary selection.
+                TermEvent::ClipboardLoad(term::ClipboardType::Clipboard, callback) => {
+                    return clipboard::read().map(move |data| {
+                        callback(&data.unwrap_or_default());
+                        cosmic::Action::None
+                    });
                 }
-                TermEvent::ClipboardStore(kind, data) => {
-                    if let term::ClipboardType::Clipboard = kind {
-                        return clipboard::write(data);
-                    }
+                TermEvent::ClipboardStore(term::ClipboardType::Clipboard, data) => {
+                    return clipboard::write(data);
                 }
                 TermEvent::ColorRequest(index, f) => {
                     if let Some(terminal) = self.terminal_by_id(id) {

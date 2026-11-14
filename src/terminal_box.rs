@@ -1184,19 +1184,17 @@ where
             }
             Event::Mouse(MouseEvent::ButtonPressed(button)) => {
                 if let Some(p) = cursor_position.position_in(layout.bounds()) {
-                    if *button == Button::Middle {
-                        if let Some(on_double_click) = &self.on_middle_double_click {
-                            let now = Instant::now();
-                            match state.middle_click.take() {
-                                Some(previous)
-                                    if now.duration_since(previous) < MIDDLE_DOUBLE_CLICK =>
-                                {
-                                    shell.publish(on_double_click());
-                                    shell.capture_event();
-                                    return;
-                                }
-                                _ => state.middle_click = Some(now),
+                    if *button == Button::Middle
+                        && let Some(on_double_click) = &self.on_middle_double_click
+                    {
+                        let now = Instant::now();
+                        match state.middle_click.take() {
+                            Some(previous) if now.duration_since(previous) < MIDDLE_DOUBLE_CLICK => {
+                                shell.publish(on_double_click());
+                                shell.capture_event();
+                                return;
                             }
+                            _ => state.middle_click = Some(now),
                         }
                     }
                     let x = p.x - self.padding.left;
@@ -1512,22 +1510,23 @@ where
                 if let Some(p) = cursor_position.position_in(layout.bounds()) {
                     // Ctrl + wheel zooms the text instead of scrolling. Handled before
                     // mouse reporting so it also works inside full-screen programs.
-                    if state.modifiers.control() && !state.modifiers.alt() && !state.modifiers.logo()
+                    if state.modifiers.control()
+                        && !state.modifiers.alt()
+                        && !state.modifiers.logo()
+                        && let Some(on_zoom) = &self.on_zoom
                     {
-                        if let Some(on_zoom) = &self.on_zoom {
-                            let notches = match delta {
-                                ScrollDelta::Lines { y, .. } => *y,
-                                ScrollDelta::Pixels { y, .. } => *y / 40.0,
-                            };
-                            state.zoom_wheel += notches;
-                            let steps = state.zoom_wheel.trunc();
-                            if steps != 0.0 {
-                                state.zoom_wheel -= steps;
-                                shell.publish(on_zoom(steps as i8));
-                            }
-                            shell.capture_event();
-                            return;
+                        let notches = match delta {
+                            ScrollDelta::Lines { y, .. } => *y,
+                            ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                        };
+                        state.zoom_wheel += notches;
+                        let steps = state.zoom_wheel.trunc();
+                        if steps != 0.0 {
+                            state.zoom_wheel -= steps;
+                            shell.publish(on_zoom(steps as i8));
                         }
+                        shell.capture_event();
+                        return;
                     }
                     if is_mouse_mode {
                         let x = p.x - self.padding.left;
